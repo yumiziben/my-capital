@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>个人资产管家</title>
+<script>
+/* 主题初始化：尽早在 <html> 上写入 data-theme，避免首屏闪白 */
+(function () {
+  var theme = 'light';
+  try {
+    var saved = localStorage.getItem('pam_theme');
+    theme = saved || ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light');
+  } catch (e) {}
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+</script>
 <style>
   /* ================= 主题变量（浅色清爽风） ================= */
   :root {
@@ -14,18 +25,40 @@
     --line: #e9eaee;
     --blue: #3b82f6;
     --blue-soft: #eff6ff;
+    --blue-soft-hover: #dbeafe;
     --green: #16a34a;
     --red: #dc2626;
     --gray: #6b7280;
+    --soft: #f1f3f6;          /* 次级底色：按钮/标签底 */
+    --soft-hover: #e6e9ee;
+    --chip: #fafbfc;          /* 输入框/信息块底 */
+    --panel: #f8f9fb;         /* 汇总条底 */
+    --track: #eef0f3;         /* 图表轨道/骨架 */
+    --faint: #b8bcc4;         /* 极淡文字 */
+    --danger-soft: #fee2e2;
+    --up-bg: #f0fdf4;
+    --up-bd: #bbf7d0;
+    --down-bg: #fef2f2;
+    --down-bd: #fecaca;
+    --warn-bg: #fef3c7;
+    --warn-bd: #fcd34d;
+    --warn-tx: #92400e;
+    --switch-off: #d8dce3;
+    --chart-up: #ef4444;
+    --chart-down: #16a34a;
+    --chart-flat: #cbd5e1;
     --shadow: 0 1px 2px rgba(0,0,0,.05), 0 6px 16px rgba(0,0,0,.05);
     --radius: 16px;
   }
+  html { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }   /* 原生控件（时间/下拉/滚动条）跟随主题 */
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
                  "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     background: var(--bg); color: var(--text); line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    transition: background .3s ease, color .3s ease;
   }
   .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 
@@ -35,52 +68,74 @@
   header { display: flex; align-items: center; justify-content: space-between; padding: 6px 2px 16px; }
   header h1 { font-size: 20px; font-weight: 700; letter-spacing: .4px; }
   header .sub { font-size: 12px; color: var(--sub); margin-top: 2px; }
+  .hd-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+  /* 主题切换按钮：圆形小按钮，太阳/月亮交叉旋转过渡 */
+  .theme-btn {
+    position: relative; width: 32px; height: 32px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line); border-radius: 50%;
+    background: var(--card); color: var(--sub); cursor: pointer;
+    transition: color .2s ease, background .2s ease, border-color .2s ease, transform .15s ease;
+  }
+  .theme-btn:hover { color: var(--text); background: var(--soft); }
+  .theme-btn:active { transform: scale(.9); }
+  .theme-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .theme-btn svg {
+    position: absolute; width: 16px; height: 16px; display: block;
+    transition: opacity .22s ease, transform .38s cubic-bezier(.34, 1.4, .64, 1);
+  }
+  .theme-btn .ic-sun  { opacity: 1; transform: rotate(0deg) scale(1); }
+  .theme-btn .ic-moon { opacity: 0; transform: rotate(-70deg) scale(.5); }
+  html[data-theme="dark"] .theme-btn .ic-sun  { opacity: 0; transform: rotate(70deg) scale(.5); }
+  html[data-theme="dark"] .theme-btn .ic-moon { opacity: 1; transform: rotate(0deg) scale(1); }
 
   /* ================= 通用卡片 ================= */
-  .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; margin-bottom: 14px; }
+  .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; margin-bottom: 14px; transition: background .3s ease, box-shadow .3s ease; }
   .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .card-title { font-size: 13px; font-weight: 600; color: var(--sub); letter-spacing: .4px; }
 
   /* ================= 按钮 ================= */
   .btn {
     border: none; cursor: pointer; border-radius: 10px; font-size: 14px;
-    padding: 9px 16px; font-weight: 500; background: #f1f3f6; color: var(--text);
+    padding: 9px 16px; font-weight: 500; background: var(--soft); color: var(--text);
     transition: transform .12s, background .12s, opacity .12s;
   }
   .btn:hover { transform: translateY(-1px); }
   .btn:active { transform: translateY(0); }
   .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
   .btn-primary { background: var(--blue); color: #fff; }
-  .btn-ghost { background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  .btn-ghost { background: var(--card); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
   .btn-sm { font-size: 12px; padding: 6px 10px; border-radius: 8px; }
-  .btn-danger { background: #fee2e2; color: var(--red); }
+  .btn-danger { background: var(--danger-soft); color: var(--red); }
   .acc-bal.down { color: var(--red); }
 
   /* 隐性的"今日工资落袋"小按钮 */
   .btn-settle {
     font-size: 11px; padding: 4px 10px; border-radius: 999px;
-    background: #f1f3f6; color: var(--sub); font-weight: 500;
+    background: var(--soft); color: var(--sub); font-weight: 500;
   }
   .btn-settle.ready { background: var(--blue-soft); color: var(--blue); }
+  /* 快捷还款小按钮：红色软底，与落袋按钮同尺寸 */
+  .btn-repay {
+    font-size: 11px; padding: 4px 10px; border-radius: 999px;
+    background: var(--down-bg); color: var(--red); font-weight: 500;
+  }
 
   /* ================= 资产大盘 ================= */
   .dash { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; align-items: center; }
   @media (max-width: 780px) { .dash { grid-template-columns: 1fr; } }
 
-  .net-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .net-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .net-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   .net-label { font-size: 13px; color: var(--sub); }
   .net-amount { font-size: 40px; font-weight: 800; letter-spacing: -.5px; margin: 2px 0 6px; }
   .net-meta { font-size: 13px; color: var(--sub); }
   .net-meta b { color: var(--text); font-weight: 600; }
-  .net-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .net-warn {
-    display: none; font-size: 12px; font-weight: 600; color: var(--red);
-    background: #fee2e2; padding: 2px 10px; border-radius: 999px; white-space: nowrap;
-  }
 
   .today-row { display: flex; gap: 10px; margin-top: 14px; }
   .today-chip {
-    flex: 1; background: #fafbfc; border: 1px solid var(--line);
+    flex: 1; background: var(--chip); border: 1px solid var(--line);
     border-radius: 12px; padding: 10px 12px;
   }
   .today-chip .k { font-size: 12px; color: var(--sub); }
@@ -120,23 +175,28 @@
   }
   .chart-canvas { display: block; width: 100%; height: 132px; touch-action: none; }
   .chart-canvas.kline { height: 172px; cursor: crosshair; }
+  /* K 线左上角实时净值：基金净值风格，4 位小数 */
+  .nav-num { font-size: 17px; font-weight: 700; letter-spacing: -.3px; line-height: 1.2; }
+  .nav-num.up { color: var(--chart-up); }
+  .nav-num.down { color: var(--chart-down); }
 
   /* ================= 表单 ================= */
-  .tabs { display: flex; gap: 6px; background: #f1f3f6; padding: 4px; border-radius: 10px; margin-bottom: 12px; }
+  .tabs { display: flex; gap: 6px; background: var(--soft); padding: 4px; border-radius: 10px; margin-bottom: 12px; }
   .tab {
     flex: 1; text-align: center; font-size: 13px; padding: 7px 4px; border-radius: 8px;
     cursor: pointer; color: var(--sub); font-weight: 500; transition: all .15s;
   }
-  .tab.active { background: #fff; color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .tab.active { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 
   .field { margin-bottom: 10px; }
   .field label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 5px; }
   input, select {
     width: 100%; padding: 9px 11px; font-size: 14px; color: var(--text);
-    border: 1px solid var(--line); border-radius: 10px; background: #fafbfc;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--chip);
     outline: none; font-family: inherit;
   }
-  input:focus, select:focus { border-color: var(--blue); background: #fff; }
+  input:focus, select:focus { border-color: var(--blue); background: var(--card); }
+  input::placeholder { color: var(--faint); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-items: end; }
 
@@ -144,25 +204,63 @@
   .filter-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .ftab {
     flex: 1; text-align: center; font-size: 12px; padding: 6px 0;
-    border-radius: 999px; background: #f1f3f6; color: var(--sub);
+    border-radius: 999px; background: var(--soft); color: var(--sub);
     cursor: pointer; transition: background .15s, color .15s; user-select: none;
   }
-  .ftab:hover { background: #e6e9ee; }
+  .ftab:hover { background: var(--soft-hover); }
   .ftab.active { background: var(--blue); color: #fff; font-weight: 600; }
   /* 当前筛选范围的收支汇总条 */
   .tx-summary {
     display: flex; gap: 12px; margin-bottom: 12px;
-    background: #f8f9fb; border: 1px solid var(--line);
+    background: var(--panel); border: 1px solid var(--line);
     border-radius: 12px; padding: 10px 14px;
   }
   .tx-summary .cell { flex: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
   .tx-summary .k { font-size: 12px; color: var(--sub); white-space: nowrap; }
   .tx-summary .v { font-size: 15px; font-weight: 700; letter-spacing: -.2px; }
+
+  /* ===== 年月概览网格（下钻视图） ===== */
+  .period-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 4px; }
+  @media (max-width: 480px) { .period-grid { grid-template-columns: repeat(3, 1fr); } }
+  .pgrid-cell {
+    border: 1px solid var(--line); border-radius: 12px; padding: 9px 6px;
+    background: var(--card); text-align: center; cursor: pointer;
+    transition: transform .15s, box-shadow .15s, background .15s;
+  }
+  .pgrid-cell .p { font-size: 12px; color: var(--sub); }
+  .pgrid-cell .n { font-size: 13px; font-weight: 700; margin-top: 3px; letter-spacing: -.2px; }
+  .pgrid-cell .cnt { font-size: 10px; color: var(--faint); margin-top: 1px; }
+  .pgrid-cell .n.up { color: var(--green); }
+  .pgrid-cell .n.down { color: var(--red); }
+  .pgrid-cell.has.up { background: var(--up-bg); border-color: var(--up-bd); }
+  .pgrid-cell.has.down { background: var(--down-bg); border-color: var(--down-bd); }
+  .pgrid-cell.has { background: var(--panel); border-color: var(--line); }
+  .pgrid-cell.empty { background: var(--chip); opacity: .65; }
+  .pgrid-cell.empty .n { color: var(--faint); font-weight: 500; }
+  .pgrid-cell:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.06); }
+
+  .period-total {
+    display: flex; align-items: baseline; justify-content: space-between;
+    font-size: 13px; color: var(--sub); padding: 12px 2px 8px;
+    border-top: 1px dashed var(--line); margin-top: 10px;
+  }
+  .period-total .num { font-size: 15px; font-weight: 700; color: var(--text); }
+  .period-total .num.up { color: var(--green); }
+  .period-total .num.down { color: var(--red); }
+
+  .subview-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .btn-back {
+    border: none; background: var(--blue-soft); color: var(--blue);
+    font-size: 13px; font-weight: 600; padding: 8px 14px;
+    border-radius: 10px; cursor: pointer; transition: background .15s;
+  }
+  .btn-back:hover { background: var(--blue-soft-hover); }
+  .subview-title { font-size: 13px; color: var(--sub); }
   .tx-list { max-height: 460px; overflow-y: auto; margin: -4px -4px 0; }
   .tx-item { display: flex; align-items: center; gap: 10px; padding: 11px 6px; border-bottom: 1px solid var(--line); }
   .tx-item:last-child { border-bottom: none; }
   .tx-icon {
-    width: 34px; height: 34px; border-radius: 10px; background: #f5f6f8;
+    width: 34px; height: 34px; border-radius: 10px; background: var(--soft);
     display: flex; align-items: center; justify-content: center; font-size: 17px; flex: 0 0 auto;
   }
   .tx-info { flex: 1; min-width: 0; }
@@ -172,8 +270,8 @@
   .tx-amt.expense { color: var(--red); }
   .tx-amt.income { color: var(--green); }
   .tx-amt.transfer { color: var(--gray); }
-  .tx-del { border: none; background: transparent; color: #b8bcc4; cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 6px; }
-  .tx-del:hover { color: var(--red); background: #fee2e2; }
+  .tx-del { border: none; background: transparent; color: var(--faint); cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 6px; }
+  .tx-del:hover { color: var(--red); background: var(--danger-soft); }
 
   /* ================= 弹层 ================= */
   .mask {
@@ -182,7 +280,7 @@
   }
   .mask.show { display: flex; }
   .modal {
-    background: #fff; border-radius: 18px; width: min(560px, 100%);
+    background: var(--card); border-radius: 18px; width: min(560px, 100%);
     max-height: 90vh; overflow-y: auto; padding: 22px; box-shadow: var(--shadow);
   }
   .modal h2 { font-size: 18px; margin-bottom: 16px; }
@@ -192,11 +290,11 @@
 
   .acc-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .acc-row:last-child { border-bottom: none; }
-  .acc-ico { width: 30px; height: 30px; border-radius: 9px; background: #f5f6f8; display: flex; align-items: center; justify-content: center; }
+  .acc-ico { width: 30px; height: 30px; border-radius: 9px; background: var(--soft); display: flex; align-items: center; justify-content: center; }
   .acc-name { font-size: 14px; font-weight: 500; }
   .acc-type { font-size: 11px; padding: 1px 6px; border-radius: 5px; margin-left: 6px; }
   .acc-type.asset { background: var(--blue-soft); color: var(--blue); }
-  .acc-type.liability { background: #fee2e2; color: var(--red); }
+  .acc-type.liability { background: var(--danger-soft); color: var(--red); }
   .acc-bal { margin-left: auto; font-size: 14px; font-weight: 600; }
 
   .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
@@ -206,14 +304,14 @@
   /* 开关 */
   .switch-row {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    background: #fafbfc; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+    background: var(--chip); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
   }
   .switch-row .t { font-size: 13px; }
   .switch-row .d { font-size: 11px; color: var(--sub); margin-top: 2px; }
   .switch { position: relative; width: 44px; height: 26px; flex: 0 0 auto; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
-    position: absolute; inset: 0; background: #d8dce3; border-radius: 999px;
+    position: absolute; inset: 0; background: var(--switch-off); border-radius: 999px;
     cursor: pointer; transition: background .2s;
   }
   .slider::after {
@@ -228,10 +326,115 @@
     border-radius: 10px; padding: 9px 12px; margin-top: 2px;
   }
   .preview-box b { color: var(--blue); }
+
+  /* ================= 备份提醒横幅 ================= */
+  .backup-banner {
+    display: none; align-items: center; gap: 8px; margin-bottom: 14px;
+    background: var(--warn-bg); color: var(--warn-tx);
+    border: 1px solid var(--warn-bd); border-radius: 12px;
+    padding: 11px 14px; font-size: 13px; font-weight: 500;
+    line-height: 1.45; cursor: pointer; user-select: none;
+    transition: transform .15s, filter .15s;
+  }
+  .backup-banner.show { display: flex; }
+  .backup-banner:hover { filter: brightness(.97); }
+  .backup-banner:active { transform: scale(.995); }
+  .backup-banner b { text-decoration: underline; font-weight: 700; }
+
+  /* ================= 本月支出结构 ================= */
+  .cat-bars { display: flex; flex-direction: column; gap: 11px; }
+  .cat-row { display: flex; flex-direction: column; gap: 5px; }
+  .cat-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .cat-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
+  .cat-pct { font-size: 11px; color: var(--sub); margin-left: 2px; }
+  .cat-amt { font-size: 12px; color: var(--sub); white-space: nowrap; }
+  .cat-track { height: 8px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .cat-fill {
+    height: 100%; border-radius: 999px; width: 0;
+    transition: width .45s cubic-bezier(.22,.8,.3,1);
+  }
+  .cat-total {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-top: 13px; padding-top: 11px; border-top: 1px dashed var(--line);
+    font-size: 12px; color: var(--sub);
+  }
+  .cat-total b { font-size: 15px; color: var(--red); font-weight: 700; }
+
+  /* ================= 流水搜索 ================= */
+  .filter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .filter-row .filter-tabs { flex: 1; min-width: 0; margin-bottom: 0; }
+  .search-box { position: relative; flex: 0 0 auto; width: 186px; }
+  .search-box .ic {
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    font-size: 12px; opacity: .5; pointer-events: none; line-height: 1;
+  }
+  .search-box input {
+    padding: 7px 30px 7px 28px; font-size: 13px; border-radius: 999px;
+    background: var(--soft); border-color: transparent;
+  }
+  .search-box input:focus { background: var(--card); border-color: var(--blue); }
+  .search-clear {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    border: none; background: transparent; color: var(--faint);
+    cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 50%;
+    display: none; line-height: 1;
+  }
+  .search-clear.show { display: block; }
+  .search-clear:hover { color: var(--text); }
+  @media (max-width: 560px) {
+    .filter-row { flex-wrap: wrap; }
+    .search-box { width: 100%; }
+  }
+
+  /* ================= 暗黑模式（html[data-theme="dark"] 时生效） ================= */
+  html[data-theme="dark"] {
+      --bg: #0f1216;
+      --card: #171b21;
+      --text: #e8eaed;
+      --sub: #98a1ad;
+      --line: #262c34;
+      --blue: #60a5fa;
+      --blue-soft: #17243a;
+      --blue-soft-hover: #1d2e4a;
+      --green: #34d399;
+      --red: #f87171;
+      --gray: #8b93a1;
+      --soft: #20252c;
+      --soft-hover: #282f37;
+      --chip: #1c2128;
+      --panel: #1b2027;
+      --track: #242a32;
+      --faint: #6b7481;
+      --danger-soft: #3a1f22;
+      --up-bg: #14261c;
+      --up-bd: #24563a;
+      --down-bg: #2a1a1c;
+      --down-bd: #5e2a2a;
+      --warn-bg: #34290f;
+      --warn-bd: #6b5518;
+      --warn-tx: #fbbf24;
+      --switch-off: #3a424c;
+      --chart-up: #f87171;
+      --chart-down: #4ade80;
+      --chart-flat: #4b5563;
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.45);
+    }
+  /* 阴影内的浅色高光在深色下会发灰，改用纯色描边提升层次 */
+  html[data-theme="dark"] .card { box-shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 22px rgba(0,0,0,.35); }
+  html[data-theme="dark"] .tab.active { box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  html[data-theme="dark"] .btn-ghost { box-shadow: 0 1px 2px rgba(0,0,0,.35); }
+  html[data-theme="dark"] .mask { background: rgba(0,0,0,.6); }
+  /* 图表内嵌的图例小方块在深色下同步调亮 */
+  html[data-theme="dark"] .chart-legend i { filter: brightness(1.15); }
 </style>
 </head>
 <body>
 <div class="container">
+
+  <!-- ================= 备份提醒横幅 ================= -->
+  <div class="backup-banner" id="backupBanner">
+    <span>⚠️ 您的数据已超过一个月未备份，为防止浏览器清理导致丢失，请</span><b>点击此处导出备份</b>
+  </div>
 
   <!-- ================= 顶部 ================= -->
   <header>
@@ -239,7 +442,13 @@
       <h1>个人资产管家</h1>
       <div class="sub" id="todayLabel">--</div>
     </div>
-    <button class="btn btn-ghost" id="btnSettings">⚙️ 设置</button>
+    <div class="hd-actions">
+      <button class="theme-btn" id="btnTheme" type="button" title="切换到深色模式" aria-label="切换到深色模式" aria-pressed="false">
+        <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4l1.4-1.4M18 6l1.4-1.4"/></svg>
+        <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4A8.6 8.6 0 1 1 10.6 3.4a6.9 6.9 0 0 0 10 10z"/></svg>
+      </button>
+      <button class="btn btn-ghost" id="btnSettings">⚙️ 设置</button>
+    </div>
   </header>
 
   <!-- ================= 资产大盘 ================= -->
@@ -248,11 +457,13 @@
       <div>
         <div class="net-top">
           <div class="net-label">总净资产（CNY）</div>
-          <button class="btn btn-settle" id="btnSettle" title="把今日实时工资结算为一笔真实收入">今日工资落袋</button>
+          <div class="net-actions">
+            <button class="btn btn-repay" id="btnRepay" title="从资产账户扣款，偿还负债账户欠款（不改变总净资产）">💳 快捷还款</button>
+            <button class="btn btn-settle" id="btnSettle" title="把今日实时工资结算为一笔真实收入">今日工资落袋</button>
+          </div>
         </div>
         <div class="net-row">
           <div class="net-amount num" id="netAmount">¥0.00</div>
-          <span class="net-warn num" id="netWarn">⚠️ 资不抵债</span>
         </div>
         <div class="net-meta num">账户余额 <b id="staticTotal">¥0.00</b> · <span id="virtualPayNote">今日实时工资 +¥0.00</span></div>
         <div class="today-row">
@@ -273,7 +484,7 @@
           <div class="donut-box">
             <svg id="donutSvg" viewBox="0 0 120 120"></svg>
             <div class="donut-center">
-              <div class="t">总盘子</div>
+              <div class="t">资产分布</div>
               <div class="a num" id="donutTotal">¥0</div>
             </div>
           </div>
@@ -294,17 +505,30 @@
         <!-- ===== 资产日 K 线（Canvas 蜡烛图，按天聚合） ===== -->
         <div class="chart-block">
           <div class="chart-head">
-            <div class="card-title">资产日 K 线</div>
+            <div class="nav-num num" id="navNum" title="当前实时净值 = 1 + (当前实时总资产 - 初始基准资产) / |初始基准资产|">1.0000</div>
             <div class="chart-legend">
               <span class="num" id="klineSpan">最近 7 日</span>
-              <i style="background:#ef4444"></i>涨
-              <i style="background:#16a34a"></i>跌
-              <i style="background:#cbd5e1"></i>平
+              <i style="background:var(--chart-up)"></i>涨
+              <i style="background:var(--chart-down)"></i>跌
+              <i style="background:var(--chart-flat)"></i>平
             </div>
           </div>
           <canvas id="klineChart" class="chart-canvas kline"></canvas>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ================= 本月支出结构 ================= -->
+  <div class="card">
+    <div class="card-head" style="margin-bottom:14px;">
+      <div class="card-title">本月支出结构</div>
+      <div class="card-title num" id="catMonthLabel">--</div>
+    </div>
+    <div class="cat-bars" id="catBars"></div>
+    <div class="cat-total">
+      <span>本月总支出</span>
+      <b class="num" id="catTotal">-¥0.00</b>
     </div>
   </div>
 
@@ -340,6 +564,9 @@
       </div>
     </div>
 
+    <!-- 转账/还款模式的动态提示行 -->
+    <div class="hint" id="transferHint" style="display:none; margin:-2px 0 10px;"></div>
+
     <button class="btn btn-primary" id="btnAddTx" style="width:100%; margin-top:2px;">记一笔</button>
   </div>
 
@@ -349,13 +576,33 @@
       <div class="card-title">流水记录</div>
       <div class="card-title num" id="txCount">今日 · 共 0 笔</div>
     </div>
-    <div class="filter-tabs" id="filterTabs">
-      <div class="ftab active" data-filter="today">今日</div>
-      <div class="ftab" data-filter="month">本月</div>
-      <div class="ftab" data-filter="year">今年</div>
-      <div class="ftab" data-filter="all">全部</div>
+    <div class="filter-row">
+      <div class="filter-tabs" id="filterTabs">
+        <div class="ftab active" data-filter="today">今日</div>
+        <div class="ftab" data-filter="month">本月</div>
+        <div class="ftab" data-filter="year">今年</div>
+        <div class="ftab" data-filter="all">全部</div>
+      </div>
+      <div class="search-box">
+        <span class="ic">🔍</span>
+        <input type="text" id="txSearch" placeholder="搜索备注 / 分类" maxlength="20" autocomplete="off">
+        <button class="search-clear" id="txSearchClear" title="清空">✕</button>
+      </div>
     </div>
-    <div class="tx-summary">
+    <!-- 下钻时的返回条 -->
+    <div class="subview-head" id="subviewHead" style="display:none;">
+      <button class="btn-back" id="btnBack">‹ 返回今年概览</button>
+      <span class="subview-title num" id="subviewTitle"></span>
+    </div>
+
+    <!-- 年月概览网格：今年 → 12 个月 / 全部 → 年份 -->
+    <div class="period-grid" id="periodGrid" style="display:none;"></div>
+    <div class="period-total" id="periodTotal" style="display:none;">
+      <span id="periodTotalLabel">今年总净收益</span>
+      <span class="num" id="periodTotalValue">+¥0.00</span>
+    </div>
+
+    <div class="tx-summary" id="txSummary">
       <div class="cell"><span class="k">收入:</span><span class="v num up" id="sumIncome">+¥0.00</span></div>
       <div class="cell"><span class="k">支出:</span><span class="v num down" id="sumExpense">-¥0.00</span></div>
     </div>
@@ -468,10 +715,37 @@
       <button class="btn btn-sm" id="btnImport">⬆️ 导入数据</button>
       <input type="file" id="fileInput" accept="application/json,.json" style="display:none;">
     </div>
+    <div class="hint" id="lastBackupText">上次备份：—</div>
     <div class="hint">导入会覆盖当前所有账户与流水，请谨慎操作。</div>
 
     <div class="modal-actions">
       <button class="btn" id="btnCloseSettings">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 快捷还款弹层 ================= -->
+<div class="mask" id="repayMask">
+  <div class="modal">
+    <h2>💳 快捷还款</h2>
+    <div class="field">
+      <label>还款金额（元）</label>
+      <input type="number" id="rAmount" placeholder="0.00" min="0.01" step="0.01" inputmode="decimal">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>从资产账户扣款</label>
+        <select id="rFrom"></select>
+      </div>
+      <div class="field">
+        <label>偿还负债账户</label>
+        <select id="rTo"></select>
+      </div>
+    </div>
+    <div class="hint" id="rHint"></div>
+    <div class="modal-actions">
+      <button class="btn" id="btnCancelRepay">取消</button>
+      <button class="btn btn-primary" id="btnConfirmRepay">💳 确认还款</button>
     </div>
   </div>
 </div>
@@ -503,7 +777,8 @@ var DEFAULT_SETTINGS = {
   lunchStart: '12:00',
   lunchEnd: '13:30',
   autoAccrual: true,       // 自动增资开关
-  creditAccountId: null    // 工资落袋账户
+  creditAccountId: null,   // 工资落袋账户
+  baseAsset: 10000         // 净值计算的初始基准资产
 };
 
 /* ---------- 读写 ---------- */
@@ -547,6 +822,16 @@ if (!accounts) {
   saveJSON(K_SET, settings);
 }
 
+/* 初始基准资产（净值 = 1 + (当前实时总资产 - 基准) / |基准|）：
+ * 未设置过时，老用户以当前静态净资产为基准；资产为 0 则默认 10000 */
+(function initBaseAsset() {
+  var rawSet = loadJSON(K_SET, {});   // 检查存储原始数据（默认值会被 Object.assign 补齐，不能看 settings）
+  if (rawSet.baseAsset !== undefined && rawSet.baseAsset !== null) return;
+  var sn = staticNet();
+  settings.baseAsset = (Math.abs(sn) > 0.005) ? sn : 10000;
+  saveJSON(K_SET, settings);
+})();
+
 /* ---------- 工具 ---------- */
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 var $ = function (id) { return document.getElementById(id); };
@@ -580,7 +865,7 @@ var CATEGORIES = {
     { key: '工资', icon: '💰' }, { key: '理财', icon: '📈' },
     { key: '红包', icon: '🧧' }, { key: '其他', icon: '📦' }
   ],
-  transfer: [{ key: '转账', icon: '🔄' }]
+  transfer: [{ key: '转账', icon: '🔄' }, { key: '还款', icon: '💳' }]
 };
 function catIcon(type, cat) {
   var list = CATEGORIES[type] || [];
@@ -761,6 +1046,22 @@ function checkDayRollover() {
  * ========================================================= */
 var PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6'];
 
+/* ---------- 实时净值（K 线左上角）：随主循环每秒刷新 ---------- */
+function currentNav() {
+  var base = Number(settings.baseAsset);
+  if (!(Math.abs(base) > 0.005)) base = 10000;   // 基准无效时兜底
+  return 1 + (currentVirtualAsset - base) / Math.abs(base);
+}
+function renderNav() {
+  var el = $('navNum');
+  if (!el) return;
+  var nav = currentNav();
+  var gain = nav - 1;
+  el.textContent = nav.toFixed(4);
+  // 红涨绿跌，与 K 线配色一致；约等于 1 时用默认色
+  el.className = 'nav-num num ' + (gain > 0.00005 ? 'up' : gain < -0.00005 ? 'down' : '');
+}
+
 function renderDashboard() {
   var now = Date.now();
   var staticTotal = staticNet();
@@ -770,8 +1071,6 @@ function renderDashboard() {
   // 总净资产大字 = 动态资产（每秒跳动）
   $('netAmount').textContent = money(currentVirtualAsset);
   $('netAmount').style.color = currentVirtualAsset < 0 ? 'var(--red)' : 'var(--text)';
-  // 资不抵债警示（净总资产为负时显示在总净资产大字旁）
-  $('netWarn').style.display = currentVirtualAsset < 0 ? 'inline-block' : 'none';
   $('staticTotal').textContent = money(staticTotal);
   $('virtualPayNote').textContent = settledToday(now)
     ? '今日工资已落袋'
@@ -799,6 +1098,8 @@ function renderDashboard() {
     btn.classList.toggle('ready', pay > 0);
   }
 
+  renderNav();      // K 线左上角实时净值（随工资每秒跳动）
+
   renderDonut();
 
   // 折线采样 + 双图重绘
@@ -820,7 +1121,11 @@ function renderDonut() {
   var totalLiab = liabs.reduce(function (s, a) { return s + a.balance; }, 0);
   var total = totalAsset + totalLiab;   // 总盘子 = 资产 + 负债（绝对值）
 
-  $('donutTotal').textContent = money(total).replace('.00', '');
+  // 中心金额强制对齐顶部"总净资产"：直接渲染同一变量 currentVirtualAsset
+  // （含实时工资、已扣支出，带正负号如 ¥-1,078.57），与顶部大字绝对一致；
+  // 色块比例仍按（资产绝对值 + 负债绝对值）绘制
+  $('donutTotal').textContent = money(currentVirtualAsset);
+  $('donutTotal').style.color = currentVirtualAsset < 0 ? 'var(--red)' : '';
 
   // 每个账户一个扇区：{ 账户, 金额(绝对值), 是否负债, 分配的颜色 }
   var items = assets.map(function (a, i) {
@@ -829,15 +1134,16 @@ function renderDonut() {
     return { acc: a, val: a.balance, liab: true, color: LIAB_COLORS[i % LIAB_COLORS.length] };
   }));
 
+  var trackColor = chartTheme().track;
   if (!items.length || total <= 0) {
-    svg.innerHTML = '<circle cx="60" cy="60" r="46" fill="none" stroke="#eef0f3" stroke-width="14"/>';
+    svg.innerHTML = '<circle cx="60" cy="60" r="46" fill="none" stroke="' + trackColor + '" stroke-width="14"/>';
     legend.innerHTML = '<div class="empty-tip">暂无账户数据<br>去设置里添加吧</div>';
     return;
   }
 
   var R = 46, C = 2 * Math.PI * R;
   var offset = 0;
-  var html = '<circle cx="60" cy="60" r="' + R + '" fill="none" stroke="#eef0f3" stroke-width="14"/>';
+  var html = '<circle cx="60" cy="60" r="' + R + '" fill="none" stroke="' + trackColor + '" stroke-width="14"/>';
   var legendHtml = '';
   items.forEach(function (it) {
     var ratio = it.val / total;
@@ -850,7 +1156,8 @@ function renderDonut() {
     legendHtml += '<div class="legend-item">' +
                     '<span class="dot" style="background:' + it.color + '"></span>' +
                     '<span class="legend-name">' + it.acc.icon + ' ' + esc(it.acc.name) + '</span>' +
-                    '<span class="legend-val num">' + (it.liab ? '-' : '') + money(it.val) +
+                    '<span class="legend-val num"' + (it.liab ? ' style="color:' + it.color + '; font-weight:600;"' : '') + '>' +
+                      (it.liab ? '-' : '') + money(it.val) +
                       ' · ' + (ratio * 100).toFixed(0) + '%</span>' +
                   '</div>';
   });
@@ -859,8 +1166,86 @@ function renderDonut() {
 }
 
 /* =========================================================
+ *  渲染：本月支出结构（按分类聚合，进度条展示占比）
+ * ========================================================= */
+var CAT_BAR_COLORS = [
+  ['#fb923c', '#ef4444'], ['#fbbf24', '#f59e0b'], ['#f472b6', '#ec4899'],
+  ['#a78bfa', '#8b5cf6'], ['#38bdf8', '#3b82f6'], ['#34d399', '#10b981'],
+  ['#fca5a5', '#dc2626'], ['#94a3b8', '#64748b']
+];
+
+function renderCategoryBreakdown() {
+  var month = todayStr().slice(0, 7);          // YYYY-MM
+  var buckets = {}, total = 0;
+
+  transactions.forEach(function (t) {
+    if (t.type !== 'expense') return;                     // 只统计支出
+    if (txDate(t).slice(0, 7) !== month) return;          // 只看本月
+    var k = t.category || '其他';
+    buckets[k] = (buckets[k] || 0) + t.amount;
+    total += t.amount;
+  });
+
+  $('catMonthLabel').textContent = month.slice(0, 4) + '年' + parseInt(month.slice(5, 7), 10) + '月';
+  $('catTotal').textContent = '- ' + money(total);
+
+  var keys = Object.keys(buckets).sort(function (a, b) { return buckets[b] - buckets[a]; });
+  if (!keys.length) {
+    $('catBars').innerHTML = '<div class="empty-tip">本月还没有支出记录</div>';
+    return;
+  }
+
+  var max = buckets[keys[0]] || 1;   // 条形长度以最大分类为满格，对比更直观
+  var html = '';
+  keys.forEach(function (k, i) {
+    var amt = buckets[k];
+    var pct = total > 0 ? amt / total * 100 : 0;
+    var w = Math.max(3, amt / max * 100);
+    var c = CAT_BAR_COLORS[i % CAT_BAR_COLORS.length];
+    html += '<div class="cat-row">' +
+              '<div class="cat-top">' +
+                '<span class="cat-name">' + catIcon('expense', k) + ' ' + esc(k) +
+                  '<span class="cat-pct num">' + pct.toFixed(0) + '%</span></span>' +
+                '<span class="cat-amt num">' + money(amt) + '</span>' +
+              '</div>' +
+              '<div class="cat-track"><div class="cat-fill" style="width:' + w.toFixed(1) +
+                '%;background:linear-gradient(90deg,' + c[0] + ',' + c[1] + ')"></div></div>' +
+            '</div>';
+  });
+  $('catBars').innerHTML = html;
+}
+
+/* =========================================================
  *  Canvas 图表
  * ========================================================= */
+/* ---------- 主题识别：Canvas 无法读取 CSS 变量，需自行判断系统深浅色 ---------- */
+var darkMQ = (window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null);
+var THEME_KEY = 'pam_theme';
+function systemDark() { return !!(darkMQ && darkMQ.matches); }
+/* 主题由 <html data-theme="dark|light"> 决定：首次跟随系统，手动切换后记忆到本地 */
+function isDark() { return document.documentElement.getAttribute('data-theme') === 'dark'; }
+/* 图表配色表：浅色 / 深色两套，深色下红绿与线条整体调亮 */
+function chartTheme() {
+  var d = isDark();
+  return {
+    dark: d,
+    grid:       d ? '#262c34' : '#f1f3f6',
+    axis:       d ? '#6b7481' : '#c1c7d0',
+    axis2:      d ? '#8b93a1' : '#9ca3af',
+    line:       d ? '#60a5fa' : '#3b82f6',
+    fillTop:    d ? 'rgba(96,165,250,.30)' : 'rgba(59,130,246,.22)',
+    fillBottom: d ? 'rgba(96,165,250,0)'   : 'rgba(59,130,246,0)',
+    dotRing:    d ? '#171b21' : '#ffffff',
+    up:         d ? '#f87171' : '#ef4444',
+    down:       d ? '#4ade80' : '#16a34a',
+    flat:       d ? '#4b5563' : '#cfd6df',
+    bodyBg:     d ? '#171b21' : '#ffffff',
+    hover:      d ? 'rgba(96,165,250,.14)' : 'rgba(59,130,246,.07)',
+    track:      d ? '#242a32' : '#eef0f3',
+    tipBg:      d ? 'rgba(10,13,17,.95)'   : 'rgba(31,35,40,.92)'
+  };
+}
+
 var assetHistory = [];
 var HISTORY_MAX = 200;
 
@@ -897,9 +1282,10 @@ function drawLineChart() {
   var plotW = W - padL - padR, plotH = H - padT - padB;
   var data = assetHistory;
 
+  var tc = chartTheme();
   ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
   if (data.length < 2) {
-    ctx.fillStyle = '#9ca3af';
+    ctx.fillStyle = tc.axis2;
     ctx.fillText('正在采集数据…', padL, H / 2);
     return;
   }
@@ -914,7 +1300,7 @@ function drawLineChart() {
   function X(i) { return padL + i / (data.length - 1) * plotW; }
   function Y(v) { return padT + (1 - (v - vmin) / span) * plotH; }
 
-  ctx.strokeStyle = '#f1f3f6';
+  ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   for (var g = 0; g <= 2; g++) {
     var gy = padT + g / 2 * plotH;
@@ -935,8 +1321,8 @@ function drawLineChart() {
   }
 
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
-  grad.addColorStop(0, 'rgba(59,130,246,.22)');
-  grad.addColorStop(1, 'rgba(59,130,246,0)');
+  grad.addColorStop(0, tc.fillTop);
+  grad.addColorStop(1, tc.fillBottom);
   traceLine();
   ctx.lineTo(pts[pts.length - 1].x, padT + plotH);
   ctx.lineTo(pts[0].x, padT + plotH);
@@ -945,7 +1331,7 @@ function drawLineChart() {
   ctx.fill();
 
   traceLine();
-  ctx.strokeStyle = '#3b82f6';
+  ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
@@ -955,18 +1341,18 @@ function drawLineChart() {
   var lastV = data[data.length - 1].v;
   ctx.beginPath();
   ctx.arc(last.x, last.y, 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#3b82f6';
+  ctx.fillStyle = tc.line;
   ctx.fill();
-  ctx.strokeStyle = '#fff';
+  ctx.strokeStyle = tc.dotRing;
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  ctx.fillStyle = '#3b82f6';
+  ctx.fillStyle = tc.line;
   ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'left';
   ctx.fillText('¥' + lastV.toFixed(2), Math.min(last.x + 6, W - padR + 2), Math.max(12, last.y - 6));
 
-  ctx.fillStyle = '#c1c7d0';
+  ctx.fillStyle = tc.axis;
   ctx.font = '9px -apple-system, sans-serif';
   ctx.fillText(shortMoney(vmax), W - padR + 6, padT + 6);
   ctx.fillText(shortMoney(vmin), W - padR + 6, padT + plotH);
@@ -1058,6 +1444,7 @@ function drawKlineChart(nowMs) {
   var padL = 8, padR = 50, padT = 10, padB = 16;
   var plotW = W - padL - padR, plotH = H - padT - padB;
 
+  var tc = chartTheme();
   var all = buildDailyCandles(nowMs || Date.now());
   if (!all.length) return;
 
@@ -1087,15 +1474,15 @@ function drawKlineChart(nowMs) {
 
   // 悬停背景条（先画，垫底）
   if (klineHover >= 0 && klineHover < candles.length) {
-    ctx.fillStyle = 'rgba(59,130,246,.07)';
+    ctx.fillStyle = tc.hover;
     ctx.fillRect(padL + slot * klineHover, padT, slot, plotH);
   }
 
   // 网格与右侧金额刻度
-  ctx.strokeStyle = '#f1f3f6';
+  ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   ctx.font = '9px -apple-system, sans-serif';
-  ctx.fillStyle = '#c1c7d0';
+  ctx.fillStyle = tc.axis;
   ctx.textAlign = 'left';
   for (var g2 = 0; g2 <= 2; g2++) {
     var gy = padT + g2 / 2 * plotH;
@@ -1111,7 +1498,7 @@ function drawKlineChart(nowMs) {
     var flat = Math.abs(c.close - c.open) <= 0.005 && Math.abs(c.high - c.low) <= 0.005;
 
     if (flat) {
-      ctx.strokeStyle = '#cfd6df';
+      ctx.strokeStyle = tc.flat;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(cx - Math.min(8, slot * 0.3), yC);
@@ -1120,7 +1507,7 @@ function drawKlineChart(nowMs) {
       return;
     }
 
-    var color = up ? '#ef4444' : '#16a34a';
+    var color = up ? tc.up : tc.down;
 
     // 上下影线：Body 顶到 High、Body 底到 Low
     ctx.strokeStyle = color;
@@ -1134,7 +1521,7 @@ function drawKlineChart(nowMs) {
     var top = Math.min(yO, yC);
     var hgt = Math.max(2, Math.abs(yC - yO));
     if (up) {
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = tc.bodyBg;
       ctx.fillRect(cx - bodyW / 2, top, bodyW, hgt);
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.2;
@@ -1146,7 +1533,7 @@ function drawKlineChart(nowMs) {
   });
 
   // X 轴日期标签（天数多时隔一根显示）
-  ctx.fillStyle = '#aab2bd';
+  ctx.fillStyle = tc.axis2;
   ctx.font = '9px -apple-system, sans-serif';
   ctx.textAlign = 'center';
   var step = candles.length > 8 ? 2 : 1;
@@ -1172,7 +1559,7 @@ function drawKlineChart(nowMs) {
     var bx = Math.min(Math.max(padL + 2, cx2 + 10), W - bw - 4);
     var by = padT + 4;
 
-    ctx.fillStyle = 'rgba(31,35,40,.92)';
+    ctx.fillStyle = tc.tipBg;
     ctx.beginPath();
     ctx.moveTo(bx + 6, by);
     ctx.lineTo(bx + bw - 6, by);
@@ -1231,47 +1618,118 @@ function drawCharts(nowMs) {
 }
 
 /* =========================================================
- *  渲染：流水（带时间筛选：今日 / 本月 / 今年 / 全部）
+ *  渲染：流水（金融 App 式层级折叠视图）
+ *  今日 / 本月 → 直接平铺明细
+ *  今年 → 12 个月网格（净收益）→ 点击下钻该月明细
+ *  全部 → 历史年份网格（净收益）→ 点击下钻该年明细
  * ========================================================= */
-var currentTimeFilter = 'today';
+var currentTab = 'today';        // 'today' | 'month' | 'year' | 'all'
+var selectedSubView = null;      // null | 'YYYY-MM'（月）| 'YYYY'（年）
+var currentTimeFilter = 'today'; // 兼容旧变量名，始终与 currentTab 同步
 var FILTER_NAMES = { today: '今日', month: '本月', year: '今年', all: '全部' };
 
-/* 基于流水 date 字段（YYYY-MM-DD）判断是否落在筛选区间 */
-function txMatchFilter(t) {
-  if (currentTimeFilter === 'all') return true;
-  var d = t.date || todayStr(new Date(t.ts));
-  var today = todayStr();
-  if (currentTimeFilter === 'today') return d === today;
-  if (currentTimeFilter === 'month') return d.slice(0, 7) === today.slice(0, 7);
-  return d.slice(0, 4) === today.slice(0, 4);   // 今年
+function txDate(t) { return t.date || todayStr(new Date(t.ts)); }
+
+/* 流水搜索：关键词命中备注或分类即可（大小写不敏感） */
+var txKeyword = '';
+function txMatchKeyword(t) {
+  if (!txKeyword) return true;
+  var k = txKeyword.toLowerCase();
+  return String(t.note || '').toLowerCase().indexOf(k) >= 0 ||
+         String(t.category || '').toLowerCase().indexOf(k) >= 0;
 }
 
-function renderTransactions() {
-  var list = $('txList');
-  var filtered = transactions.filter(txMatchFilter);
-  var sorted = filtered.slice().sort(function (a, b) { return b.ts - a.ts; });
-  $('txCount').textContent = FILTER_NAMES[currentTimeFilter] + ' · 共 ' + sorted.length + ' 笔';
+/* 某条流水是否落在指定 tab 的区间内 */
+function txInTab(t, tab) {
+  var d = txDate(t), today = todayStr();
+  if (tab === 'today') return d === today;
+  if (tab === 'month') return d.slice(0, 7) === today.slice(0, 7);
+  if (tab === 'year') return d.slice(0, 4) === today.slice(0, 4);
+  return true;   // all
+}
 
-  // 当前筛选范围的收支汇总（转账 type='transfer' 不计入任何一边）
-  var sumInc = 0, sumExp = 0;
-  filtered.forEach(function (t) {
-    if (t.type === 'income') sumInc += t.amount;
-    else if (t.type === 'expense') sumExp += t.amount;
+/* 一组流水的收支合计（转账不计入收入/支出，只计数） */
+function sumTx(list) {
+  var inc = 0, exp = 0;
+  list.forEach(function (t) {
+    if (t.type === 'income') inc += t.amount;
+    else if (t.type === 'expense') exp += t.amount;
   });
-  $('sumIncome').textContent = '+ ' + money(sumInc);
-  $('sumExpense').textContent = '- ' + money(sumExp);
+  return { inc: inc, exp: exp, net: inc - exp, count: list.length };
+}
 
-  if (!sorted.length) {
-    list.innerHTML = '<div class="empty-tip">还没有流水记录，试着记一笔吧</div>';
-    return;
+/* 净收益文本：正数带 +、负数带 - */
+function fmtNet(net) {
+  if (Math.abs(net) < 0.005) return money(0);
+  return (net > 0 ? '+' : '-') + money(Math.abs(net));
+}
+
+/* 今年 1~12 月网格 */
+function buildMonthGrid(list) {
+  var year = String(new Date().getFullYear());
+  var buckets = {};
+  for (var i = 1; i <= 12; i++) buckets[i] = { inc: 0, exp: 0, n: 0 };
+
+  (list || transactions).forEach(function (t) {
+    var d = txDate(t);
+    if (d.slice(0, 4) !== year) return;
+    var m = parseInt(d.slice(5, 7), 10);
+    if (!buckets[m]) return;
+    if (t.type === 'income') buckets[m].inc += t.amount;
+    else if (t.type === 'expense') buckets[m].exp += t.amount;
+    buckets[m].n++;
+  });
+
+  var html = '';
+  for (var m2 = 1; m2 <= 12; m2++) {
+    var b = buckets[m2], net = b.inc - b.exp, has = b.n > 0;
+    var cellCls = has ? (net > 0.004 ? 'has up' : net < -0.004 ? 'has down' : 'has') : 'empty';
+    var nCls = !has ? '' : (net > 0.004 ? 'up' : net < -0.004 ? 'down' : '');
+    html += '<div class="pgrid-cell ' + cellCls + '" data-sub="' + year + '-' + pad2(m2) + '">' +
+              '<div class="p">' + m2 + '月</div>' +
+              '<div class="n num ' + nCls + '">' + (has ? fmtNet(net) : '—') + '</div>' +
+              (has ? '<div class="cnt num">' + b.n + ' 笔</div>' : '') +
+            '</div>';
   }
+  return html;
+}
 
+/* 全部：历史上所有有过流水的年份网格（倒序） */
+function buildYearGrid(list) {
+  var buckets = {};
+  (list || transactions).forEach(function (t) {
+    var y = txDate(t).slice(0, 4);
+    if (!buckets[y]) buckets[y] = { inc: 0, exp: 0, n: 0 };
+    if (t.type === 'income') buckets[y].inc += t.amount;
+    else if (t.type === 'expense') buckets[y].exp += t.amount;
+    buckets[y].n++;
+  });
+  var years = Object.keys(buckets).sort().reverse();
+  if (!years.length) {
+    return '<div class="empty-tip" style="grid-column:1/-1;">还没有任何流水记录</div>';
+  }
+  var html = '';
+  years.forEach(function (y) {
+    var b = buckets[y], net = b.inc - b.exp;
+    var cellCls = net > 0.004 ? 'has up' : net < -0.004 ? 'has down' : 'has';
+    var nCls = net > 0.004 ? 'up' : net < -0.004 ? 'down' : '';
+    html += '<div class="pgrid-cell ' + cellCls + '" data-sub="' + y + '">' +
+              '<div class="p">' + y + '年</div>' +
+              '<div class="n num ' + nCls + '">' + fmtNet(net) + '</div>' +
+              '<div class="cnt num">' + b.n + ' 笔</div>' +
+            '</div>';
+  });
+  return html;
+}
+
+/* 明细列表 HTML */
+function txItemsHtml(sorted) {
   var today = todayStr();
   var html = '';
   sorted.forEach(function (t) {
     var from = getAcc(t.accountId), to = getAcc(t.toAccountId);
     var accText = (t.type === 'transfer')
-      ? (from ? from.name : '已删除') + ' → ' + (to ? to.name : '已删除')
+      ? (from ? from.icon + ' ' + from.name : '已删除账户') + ' ➡️ ' + (to ? to.icon + ' ' + to.name : '已删除账户')
       : (from ? from.name : '已删除账户');
     var d = new Date(t.ts);
     var timeText = (t.date === today ? '' : t.date + ' ') + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
@@ -1291,7 +1749,88 @@ function renderTransactions() {
               '<button class="tx-del" data-id="' + t.id + '">删除</button>' +
             '</div>';
   });
-  list.innerHTML = html;
+  return html;
+}
+
+/* 主渲染：根据 currentTab / selectedSubView 决定渲染概览网格还是明细列表 */
+function renderTransactions() {
+  var listEl = $('txList');
+  var gridEl = $('periodGrid');
+  var sumEl = $('txSummary');
+  var headEl = $('subviewHead');
+  var totalEl = $('periodTotal');
+  var countEl = $('txCount');
+  var backEl = $('btnBack');
+  var subTitleEl = $('subviewTitle');
+
+  currentTimeFilter = currentTab;   // 同步旧变量，避免其他逻辑读到过期值
+  // 今日 / 本月是平铺视图，不允许残留下钻状态
+  if (currentTab === 'today' || currentTab === 'month') selectedSubView = null;
+
+  // 搜索：作为最外层过滤，叠加在 Tab 选择与下钻之上
+  var base = transactions.filter(txMatchKeyword);
+  var searching = !!txKeyword;
+
+  // 有关键词时直接落到结果列表，不停留在年月概览网格
+  var isGrid = (currentTab === 'year' || currentTab === 'all') && !selectedSubView && !searching;
+  var list = [], listLabel = '';
+
+  if (isGrid) {
+    // ---------- 概览网格 ----------
+    gridEl.innerHTML = currentTab === 'year' ? buildMonthGrid(base) : buildYearGrid(base);
+
+    var scope = currentTab === 'year'
+      ? base.filter(function (t) { return txInTab(t, 'year'); })
+      : base.slice();
+    var agg = sumTx(scope);
+
+    $('periodTotalLabel').textContent = currentTab === 'year' ? '今年总净收益' : '历史总净收益';
+    var pv = $('periodTotalValue');
+    pv.className = 'num ' + (agg.net > 0.004 ? 'up' : agg.net < -0.004 ? 'down' : '');
+    pv.textContent = fmtNet(agg.net);
+    countEl.textContent = (currentTab === 'year' ? '今年' : '全部') + ' · 共 ' + scope.length + ' 笔';
+  } else {
+    // ---------- 明细列表 ----------
+    if (currentTab === 'today' || currentTab === 'month') {
+      list = base.filter(function (t) { return txInTab(t, currentTab); });
+      listLabel = FILTER_NAMES[currentTab];
+    } else if (currentTab === 'year' && selectedSubView) {
+      list = base.filter(function (t) { return txDate(t).slice(0, 7) === selectedSubView; });
+      listLabel = selectedSubView.slice(0, 4) + '年' + parseInt(selectedSubView.slice(5, 7), 10) + '月';
+      subTitleEl.textContent = listLabel;
+      backEl.textContent = '‹ 返回今年概览';
+    } else if (currentTab === 'all' && selectedSubView) {
+      list = base.filter(function (t) { return txDate(t).slice(0, 4) === selectedSubView; });
+      listLabel = selectedSubView + '年';
+      subTitleEl.textContent = listLabel;
+      backEl.textContent = '‹ 返回全部年份';
+    } else {
+      // 今年 / 全部 + 搜索结果：直接平铺命中流水
+      list = base.filter(function (t) { return txInTab(t, currentTab); });
+      listLabel = FILTER_NAMES[currentTab];
+    }
+    if (searching) listLabel += ' · 搜索';
+
+    var agg2 = sumTx(list);
+    $('sumIncome').textContent = '+ ' + money(agg2.inc);
+    $('sumExpense').textContent = '- ' + money(agg2.exp);
+    countEl.textContent = listLabel + ' · 共 ' + list.length + ' 笔';
+  }
+
+  // 视图显隐：网格模式隐藏收支汇总条，下钻时显示返回条
+  gridEl.style.display = isGrid ? 'grid' : 'none';
+  totalEl.style.display = isGrid ? 'flex' : 'none';
+  sumEl.style.display = isGrid ? 'none' : 'flex';
+  headEl.style.display = (!isGrid && selectedSubView) ? 'flex' : 'none';
+
+  if (isGrid) { listEl.innerHTML = ''; return; }
+
+  var sorted = list.slice().sort(function (a, b) { return b.ts - a.ts; });
+  listEl.innerHTML = sorted.length
+    ? txItemsHtml(sorted)
+    : '<div class="empty-tip">' +
+        (searching ? '没有匹配「' + esc(txKeyword) + '」的流水记录' : '该时间段暂无流水记录') +
+      '</div>';
 }
 
 /* =========================================================
@@ -1304,13 +1843,17 @@ function fillCategoryOptions() {
     return '<option value="' + c.key + '">' + c.icon + ' ' + c.key + '</option>';
   }).join('');
 }
+function accOption(a) {
+  return '<option value="' + a.id + '">' + a.icon + ' ' + esc(a.name) +
+         '（' + (a.type === 'asset' ? '资产' : '负债') + ' ' + money(a.balance) + '）</option>';
+}
 function fillAccountOptions() {
-  var opts = accounts.map(function (a) {
-    return '<option value="' + a.id + '">' + a.icon + ' ' + esc(a.name) +
-           '（' + (a.type === 'asset' ? '资产' : '负债') + ' ' + money(a.balance) + '）</option>';
-  }).join('');
-  $('fAccount').innerHTML = opts || '<option value="">请先添加账户</option>';
-  $('fToAccount').innerHTML = opts || '<option value="">请先添加账户</option>';
+  /* 转账时转出账户只允许资产账户；转入账户允许全部（选负债账户 = 还款） */
+  var fromList = formType === 'transfer'
+    ? accounts.filter(function (a) { return a.type === 'asset'; })
+    : accounts;
+  $('fAccount').innerHTML = fromList.map(accOption).join('') || '<option value="">请先添加账户</option>';
+  $('fToAccount').innerHTML = accounts.map(accOption).join('') || '<option value="">请先添加账户</option>';
   if (accounts.length > 1) $('fToAccount').selectedIndex = 1;
 }
 
@@ -1322,13 +1865,36 @@ function switchType(type) {
   }
   $('toWrap').style.display = type === 'transfer' ? '' : 'none';
   $('fromLabel').textContent = type === 'transfer' ? '转出账户' : '账户';
+  $('transferHint').style.display = type === 'transfer' ? '' : 'none';
   fillCategoryOptions();
+  fillAccountOptions();     // 切换类型后刷新账户选项（转账限资产转出）
+  updateTransferHint();
+}
+
+/* 转账交互提示：转入负债账户 = 还款，按钮文案与提示行动态变化 */
+function updateTransferHint() {
+  var btn = $('btnAddTx');
+  var hint = $('transferHint');
+  if (formType !== 'transfer') { btn.textContent = '记一笔'; return; }
+  var from = getAcc($('fAccount').value);
+  var to = getAcc($('fToAccount').value);
+  var repaying = !!(to && to.type === 'liability');
+  btn.textContent = repaying ? '💳 确认还款' : '确认转账';
+  $('fCategory').value = repaying ? '还款' : '转账';   // 分类自动跟随
+  hint.innerHTML = repaying
+    ? '💳 还款模式：从 <b>' + (from ? esc(from.name) : '—') + '</b> 扣款偿还 <b>' + esc(to.name) +
+      '</b> 的欠款（当前欠款 ' + money(to.balance) + '）。不计入收支统计，总净资产不变。'
+    : '从 <b>' + (from ? esc(from.name) : '—') + '</b> 转入 <b>' + (to ? esc(to.name) : '—') +
+      '</b>。账户间划转，不计入收入/支出统计，总净资产不变。';
 }
 
 $('typeTabs').addEventListener('click', function (e) {
   var t = e.target.closest('.tab');
   if (t) switchType(t.getAttribute('data-type'));
 });
+/* 转出/转入账户变化时同步提示行与按钮文案 */
+$('fToAccount').addEventListener('change', function () { if (formType === 'transfer') updateTransferHint(); });
+$('fAccount').addEventListener('change', function () { if (formType === 'transfer') updateTransferHint(); });
 
 $('btnAddTx').addEventListener('click', function () {
   var amount = parseFloat($('fAmount').value);
@@ -1359,20 +1925,51 @@ $('btnAddTx').addEventListener('click', function () {
   $('fAmount').value = '';
   $('fNote').value = '';
   renderAll();
-  pushHistory(currentVirtualAsset);   // 让折线立即产生跳变
+  pushHistory(currentVirtualAsset);   // 收支会让折线跳变；转账/还款不改变净资产，曲线保持平稳
   drawCharts();
 });
 
-/* 时间筛选 Tab 切换：切换后按当前筛选重新渲染流水列表 */
+/* 搜索框：实时过滤（与 Tab / 下钻叠加），并同步收支汇总 */
+$('txSearch').addEventListener('input', function () {
+  txKeyword = this.value.trim();
+  $('txSearchClear').classList.toggle('show', !!txKeyword);
+  renderTransactions();
+});
+$('txSearchClear').addEventListener('click', function () {
+  $('txSearch').value = '';
+  txKeyword = '';
+  this.classList.remove('show');
+  renderTransactions();
+  $('txSearch').focus();
+});
+
+/* 时间筛选 Tab 切换：切换后重置下钻状态并重新渲染 */
 $('filterTabs').addEventListener('click', function (e) {
   var tab = e.target && e.target.classList && e.target.classList.contains('ftab')
     ? e.target : (e.target.closest ? e.target.closest('.ftab') : null);
   if (!tab || !this.contains(tab)) return;
-  currentTimeFilter = tab.getAttribute('data-filter');
+  currentTab = tab.getAttribute('data-filter');
+  selectedSubView = null;          // 回到概览层级
   var tabs = this.querySelectorAll('.ftab');
   for (var i = 0; i < tabs.length; i++) {
     tabs[i].classList.toggle('active', tabs[i] === tab);
   }
+  renderTransactions();
+});
+
+/* 点击月份/年份格子 → 下钻到该区间的明细列表 */
+$('periodGrid').addEventListener('click', function (e) {
+  var cell = e.target.closest ? e.target.closest('.pgrid-cell') : null;
+  if (!cell || !this.contains(cell)) return;
+  var sub = cell.getAttribute('data-sub');
+  if (!sub) return;                // 空月份/空年份不可下钻
+  selectedSubView = sub;
+  renderTransactions();
+});
+
+/* 返回概览 */
+$('btnBack').addEventListener('click', function () {
+  selectedSubView = null;
   renderTransactions();
 });
 
@@ -1403,6 +2000,75 @@ $('txList').addEventListener('click', function (e) {
 $('btnSettle').addEventListener('click', settleTodaySalary);
 
 /* =========================================================
+ *  快捷还款：生成一条 transfer 流水（资产账户 → 负债账户）
+ *  还款同时减少资产余额与负债欠款，总净资产不变，不计入收入/支出，
+ *  因此动态资产曲线与日 K 线保持平稳，不产生断崖式波动。
+ * ========================================================= */
+var repayMask = $('repayMask');
+
+function openRepay() {
+  var assets = accounts.filter(function (a) { return a.type === 'asset'; });
+  var liabs = accounts.filter(function (a) { return a.type === 'liability'; });
+  if (!assets.length || !liabs.length) {
+    alert('快捷还款需要同时存在资产账户与负债账户，请先在设置中添加');
+    return;
+  }
+  $('rFrom').innerHTML = assets.map(accOption).join('');
+  $('rTo').innerHTML = liabs.map(function (a) {
+    return '<option value="' + a.id + '">' + a.icon + ' ' + esc(a.name) + '（欠款 ' + money(a.balance) + '）</option>';
+  }).join('');
+  $('rAmount').value = '';
+  updateRepayHint();
+  repayMask.classList.add('show');
+}
+
+function updateRepayHint() {
+  var from = getAcc($('rFrom').value);
+  var to = getAcc($('rTo').value);
+  var amt = parseFloat($('rAmount').value) || 0;
+  var el = $('rHint');
+  if (!from || !to) { el.textContent = ''; return; }
+  var left = round2(to.balance - amt);
+  el.innerHTML = '从 <b>' + esc(from.name) + '</b>（余额 ' + money(from.balance) + '）扣款，偿还 <b>' +
+    esc(to.name) + '</b> 的欠款：' + money(to.balance) + ' → <b>' + money(left) + '</b>。' +
+    '还款不计入收支统计，总净资产不变。';
+}
+
+function confirmRepay() {
+  var from = getAcc($('rFrom').value);
+  var to = getAcc($('rTo').value);
+  var amount = parseFloat($('rAmount').value);
+  if (!from || !to) { alert('请选择扣款账户与还款账户'); return; }
+  if (!(amount > 0)) { alert('请输入大于 0 的还款金额'); return; }
+  if (from.balance < amount && !confirm(from.name + ' 余额不足（当前 ' + money(from.balance) + '），仍要继续还款吗？')) return;
+
+  var now = new Date();
+  var tx = {
+    id: uid(), ts: now.getTime(), date: todayStr(now),
+    type: 'transfer', category: '还款',
+    note: '偿还 ' + to.name, amount: round2(amount),
+    accountId: from.id, toAccountId: to.id
+  };
+  transactions.push(tx);
+  applyTx(tx, 1);
+  saveJSON(K_TX, transactions);
+  saveJSON(K_ACC, accounts);
+
+  repayMask.classList.remove('show');
+  renderAll();
+  pushHistory(currentVirtualAsset);   // 总净资产不变，折线保持平稳
+  drawCharts();
+}
+
+$('btnRepay').addEventListener('click', openRepay);
+$('btnCancelRepay').addEventListener('click', function () { repayMask.classList.remove('show'); });
+repayMask.addEventListener('click', function (e) { if (e.target === repayMask) repayMask.classList.remove('show'); });
+$('btnConfirmRepay').addEventListener('click', confirmRepay);
+$('rAmount').addEventListener('input', updateRepayHint);
+$('rFrom').addEventListener('change', updateRepayHint);
+$('rTo').addEventListener('change', updateRepayHint);
+
+/* =========================================================
  *  设置面板
  * ========================================================= */
 var mask = $('settingsMask');
@@ -1426,6 +2092,7 @@ function openSettings() {
   updateRatePreview();
   renderAccountList();
   resetAccountForm();
+  checkBackupReminder();
   mask.classList.add('show');
 }
 
@@ -1467,6 +2134,27 @@ $('sStart').addEventListener('change', updateRatePreview);
 $('sEnd').addEventListener('change', updateRatePreview);
 $('sLunchStart').addEventListener('change', updateRatePreview);
 $('sLunchEnd').addEventListener('change', updateRatePreview);
+
+/* 手动切换深浅色：写入 pam_theme 后不再跟随系统；环形图与 Canvas 需重绘 */
+function syncThemeBtn() {
+  var b = $('btnTheme');
+  if (!b) return;
+  var tip = isDark() ? '切换到浅色模式' : '切换到深色模式';
+  b.setAttribute('title', tip);
+  b.setAttribute('aria-label', tip);
+  b.setAttribute('aria-pressed', isDark() ? 'true' : 'false');
+}
+function setTheme(mode) {
+  document.documentElement.setAttribute('data-theme', mode);
+  try { localStorage.setItem(THEME_KEY, mode); } catch (e) {}
+  syncThemeBtn();
+  renderDonut();
+  drawCharts();
+}
+$('btnTheme').addEventListener('click', function () {
+  setTheme(isDark() ? 'light' : 'dark');
+});
+syncThemeBtn();
 
 $('btnSettings').addEventListener('click', openSettings);
 $('btnCloseSettings').addEventListener('click', function () { mask.classList.remove('show'); });
@@ -1608,7 +2296,35 @@ function resetAccountForm() {
 /* =========================================================
  *  数据备份
  * ========================================================= */
-$('btnExport').addEventListener('click', function () {
+var K_BACKUP = 'pam_lastBackup';
+var BACKUP_DAYS = 30;
+
+function getLastBackup() {
+  var v = parseInt(localStorage.getItem(K_BACKUP), 10);
+  return isNaN(v) ? 0 : v;
+}
+function markBackup() {
+  localStorage.setItem(K_BACKUP, String(Date.now()));
+  checkBackupReminder();
+}
+
+/* 超过 30 天或从未备份 → 顶部黄色横幅 */
+function checkBackupReminder() {
+  var last = getLastBackup();
+  var overdue = !last || (Date.now() - last) > BACKUP_DAYS * 86400000;
+  var el = $('backupBanner');
+  if (el) el.classList.toggle('show', overdue);
+  var hint = $('lastBackupText');
+  if (hint) {
+    hint.textContent = last
+      ? '上次备份：' + new Date(last).toLocaleString('zh-CN')
+      : '上次备份：从未备份';
+  }
+  return overdue;
+}
+
+/* 导出：下载 JSON 并记录备份时间 */
+function exportData() {
   var data = {
     app: '个人资产管家', version: 2,
     exportedAt: new Date().toISOString(),
@@ -1626,7 +2342,12 @@ $('btnExport').addEventListener('click', function () {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-});
+  markBackup();
+}
+
+$('btnExport').addEventListener('click', exportData);
+/* 点击横幅直接导出，成功后横幅自动消失 */
+$('backupBanner').addEventListener('click', exportData);
 
 $('btnImport').addEventListener('click', function () { $('fileInput').click(); });
 
@@ -1662,6 +2383,10 @@ $('fileInput').addEventListener('change', function (e) {
         };
       });
       settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
+      if (!data.settings || data.settings.baseAsset === undefined) {
+        var snImp = staticNet();   // 旧备份无基准字段：以导入后的资产为基准
+        settings.baseAsset = (Math.abs(snImp) > 0.005) ? snImp : 10000;
+      }
       if (settings.creditAccountId && !getAcc(settings.creditAccountId)) {
         var firstAsset = accounts.filter(function (a) { return a.type === 'asset'; })[0];
         settings.creditAccountId = firstAsset ? firstAsset.id : null;
@@ -1694,6 +2419,7 @@ function renderAll() {
   $('todayLabel').textContent = d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() +
                                 '日 星期' + WEEK[d.getDay()];
   renderDashboard();
+  renderCategoryBreakdown();
   renderTransactions();
   fillAccountOptions();
 }
@@ -1712,6 +2438,29 @@ renderAll();
 
 window.addEventListener('resize', drawCharts);
 window.addEventListener('orientationchange', function () { setTimeout(drawCharts, 150); });
+
+/* 系统深浅色切换时：重绘环形图与两张 Canvas（Canvas 颜色不跟着 CSS 走） */
+(function watchTheme() {
+  var rerender = function () {
+    renderDonut();
+    drawCharts();
+  };
+  if (!darkMQ) return;
+  /* 系统切换深浅色：仅在用户未手动选过主题时跟随 */
+  var onSystem = function () {
+    var saved = null;
+    try { saved = localStorage.getItem(THEME_KEY); } catch (e) {}
+    if (saved) return;
+    document.documentElement.setAttribute('data-theme', systemDark() ? 'dark' : 'light');
+    syncThemeBtn();
+    rerender();
+  };
+  if (darkMQ.addEventListener) darkMQ.addEventListener('change', onSystem);
+  else if (darkMQ.addListener) darkMQ.addListener(onSystem);
+})();
+
+/* 备份提醒：加载时先检查一次 */
+checkBackupReminder();
 
 /* 每秒刷新：虚拟资产跳动 + 折线/K线重绘 + 跨天检查 */
 setInterval(function () {
