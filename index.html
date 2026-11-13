@@ -176,7 +176,7 @@
   }
   .chart-canvas { display: block; width: 100%; height: 132px; touch-action: none; }
   .chart-canvas.kline { height: 172px; cursor: crosshair; }
-  /* K 线左上角实时净值：基金净值风格，4 位小数 */
+  /* K 线左上角实时涨幅：日环比口径（相对昨收），红涨绿跌 */
   .nav-num { font-size: 17px; font-weight: 700; letter-spacing: -.3px; line-height: 1.2; }
   .nav-num.up { color: var(--chart-up); }
   .nav-num.down { color: var(--chart-down); }
@@ -507,7 +507,7 @@
         <!-- ===== 资产日 K 线（Canvas 蜡烛图，按天聚合） ===== -->
         <div class="chart-block">
           <div class="chart-head">
-            <div class="nav-num num" id="navNum" title="当前实时净值 = 1 + (当前实时总资产 - 初始基准资产) / |初始基准资产|">1.0000</div>
+            <div class="nav-num num" id="navNum" title="今日涨幅 = (实时总资产 - 昨收) / |昨收| · 日环比口径，与日 K 线一致">0%</div>
             <div class="chart-legend">
               <span class="num" id="klineSpan">最近 7 日</span>
               <i style="background:var(--chart-up)"></i>涨
@@ -616,6 +616,20 @@
 <div class="mask" id="settingsMask">
   <div class="modal">
     <h2>⚙️ 设置</h2>
+
+    <!-- 日 K 涨幅基准 -->
+    <div class="section-title">日 K 线涨幅基准</div>
+    <div class="field">
+      <label>初始基准资产（元）</label>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input type="number" id="sBaseAsset" min="1" step="0.01" placeholder="6300" style="flex:1; min-width:0; width:auto;">
+        <button class="btn btn-sm" id="btnBaseFromNet" style="white-space:nowrap; flex:none;">用当前净资产</button>
+      </div>
+    </div>
+    <div class="hint">日 K 涨幅按"日环比"计算：每天 =（当日资产 − 昨日收盘）/ |昨日收盘| × 100%。此基准只在最左侧第一天没有"昨天"时充当昨收参照（即图上 0% 参照线）。</div>
+    <button class="btn btn-primary btn-sm" id="btnSaveBase" style="margin-top:10px;">保存基准资产</button>
+
+    <div class="hr"></div>
 
     <!-- 薪资与计薪 -->
     <div class="section-title">被动收入（自动增资）</div>
@@ -780,7 +794,8 @@ var DEFAULT_SETTINGS = {
   lunchEnd: '13:30',
   autoAccrual: true,       // 自动增资开关
   creditAccountId: null,   // 工资落袋账户
-  baseAsset: 10000         // 净值计算的初始基准资产
+  baseAsset: 6300,         // 日 K 最左一天的"昨收"参照（0% 参照线），可在设置里改
+  baseAssetManual: false   // true = 用户在设置里手动指定过基准，不再自动推导
 };
 
 /* ---------- 读写 ---------- */
@@ -829,14 +844,18 @@ if (!accounts) {
   saveJSON(K_SET, settings);
 }
 
-/* 初始基准资产（净值 = 1 + (当前实时总资产 - 基准) / |基准|）：
- * 未设置过时，老用户以当前静态净资产为基准；资产为 0 则默认 10000 */
+/* 日 K 基准资产（Base）：
+ *   日环比口径下，Base 只在最左侧第一天（没有"昨天"）时充当昨收参照。
+ * 基准的唯一入口是 klineBase()（见下），这里只保证存储里有合法初值。
+ * 从未手动设置过基准时，klineBase() 会自动推导（起始资产 / 6300），
+ * 因此这里不需要写死任何用户数据的快照。 */
 (function initBaseAsset() {
-  var rawSet = loadJSON(K_SET, {});   // 检查存储原始数据（默认值会被 Object.assign 补齐，不能看 settings）
-  if (rawSet.baseAsset !== undefined && rawSet.baseAsset !== null) return;
-  var sn = staticNet();
-  settings.baseAsset = (Math.abs(sn) > 0.005) ? sn : 10000;
-  saveJSON(K_SET, settings);
+  var rawSet = loadJSON(K_SET, {});
+  if (rawSet.baseAsset === undefined || rawSet.baseAsset === null ||
+      !(Number(rawSet.baseAsset) > 0)) {
+    settings.baseAsset = 6300;
+    saveJSON(K_SET, settings);
+  }
 })();
 
 /* ---------- 工具 ---------- */
@@ -1057,20 +1076,58 @@ function checkDayRollover() {
  * ========================================================= */
 var PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#14b8a6'];
 
-/* ---------- 实时净值（K 线左上角）：随主循环每秒刷新 ---------- */
-function currentNav() {
-  var base = Number(settings.baseAsset);
-  if (!(Math.abs(base) > 0.005)) base = 10000;   // 基准无效时兜底
-  return 1 + (currentVirtualAsset - base) / Math.abs(base);
+/* =========================================================
+ *  日 K 基准资产（Base）—— 唯一真源
+ *  【日环比口径】每天蜡烛的涨跌幅相对"昨日收盘资产"计算：
+ *    涨幅 =（当日资产 - 昨收）/ |昨收| × 100%
+ *  Base 的作用：图表最左侧第一天没有"昨天"，它的昨收参照就是 Base；
+ *  「初始」锚点蜡烛固定在 Base 上、涨幅天然 0%，是整张图的水平参照线。
+ *  取值优先级：
+ *    1) 用户在「设置 → 日 K 线涨幅基准」里手动填过 → 用填的值；
+ *    2) 否则若记账史开始前的资产为正 → 用它（第一天的昨收与真实起始资产一致）；
+ *    3) 起始资产为 0 或负数 → 用存储的 baseAsset（默认 6300），基准永不取负数。
+ * ========================================================= */
+function klineBase() {
+  var b = Number(settings.baseAsset);
+  if (settings.baseAssetManual === true && isFinite(b) && b > 0.005) return b;
+  var anchor = lineAnchorValue();
+  // 只有"正的"起始资产才自动推导；起始为 0 或为负（负债、净资产为负）时
+  // 绝不能拿 |负数| 当基准 —— 否则资产变负的瞬间基准跟着跳变，涨幅全是错值
+  if (anchor > 0.005) return anchor;
+  if (isFinite(b) && b > 0.005) return b;
+  return 6300;
 }
+/* 百分比数字：≥100 取整，≥10 一位小数，其余两位 */
+function pctNum(v) {
+  var a = Math.abs(v);
+  if (a >= 100) return a.toFixed(0);
+  if (a >= 10) return a.toFixed(1);
+  return a.toFixed(2);
+}
+/* 百分比文本：0% / +500% / -20%（刻度、悬停、标题共用，格式统一） */
+function pctText(v, withSign) {
+  if (!isFinite(v) || Math.abs(v) < 0.005) return '0%';
+  var sign = v > 0 ? '+' : '-';
+  if (withSign === false) sign = '';
+  return sign + pctNum(v) + '%';
+}
+
+/* ---------- 实时涨幅（K 线左上角）：随主循环每秒刷新 ----------
+ * 与日 K 同一口径（日环比）：今日实时涨幅 = (实时总资产 - 昨收) / |昨收| × 100%
+ * 昨收 = 昨日收盘资产；没有历史日时 = 基准资产（见 klineBase）。 */
 function renderNav() {
   var el = $('navNum');
   if (!el) return;
-  var nav = currentNav();
-  var gain = nav - 1;
-  el.textContent = nav.toFixed(4);
-  // 红涨绿跌，与 K 线配色一致；约等于 1 时用默认色
-  el.className = 'nav-num num ' + (gain > 0.00005 ? 'up' : gain < -0.00005 ? 'down' : '');
+  var todayC = buildDailyCandles(Date.now());
+  var last = todayC[todayC.length - 1];
+  var pct = last ? last.pClose : 0;
+  var ref = (last && last.prevClose !== null && last.prevClose !== undefined)
+    ? last.prevClose : klineBase();
+  el.textContent = pctText(pct);
+  // 红涨绿跌，与 K 线配色一致；约等于 0% 时用默认色
+  el.className = 'nav-num num ' + (pct > 0.005 ? 'up' : pct < -0.005 ? 'down' : '');
+  el.title = '今日涨幅 = (实时总资产 ' + money(currentVirtualAsset) +
+    ' - 昨收 ' + money(ref) + ') / |昨收| × 100% · 日环比口径，与日 K 线一致';
 }
 
 function renderDashboard() {
@@ -1109,7 +1166,7 @@ function renderDashboard() {
     btn.classList.toggle('ready', pay > 0);
   }
 
-  renderNav();      // K 线左上角实时净值（随工资每秒跳动）
+  renderNav();      // K 线左上角实时涨幅（日环比口径，随工资每秒跳动）
 
   // 环形图已移出秒级刷新：只随记账/落袋/账户变更（renderAll）重绘
 
@@ -1285,16 +1342,51 @@ function shortMoney(v) {
   return v.toFixed(a < 10 ? 1 : 0);
 }
 
-/* 图一：实时资产分时折线（数据源 currentVirtualAsset） */
+/* 图一：实时资产分时折线（数据源 currentVirtualAsset）
+ * 三条规则：
+ *   1) 右侧刻度 + 实时金额药丸标签：留白按文字实测宽度动态计算，任何屏幕宽度都不会被裁切；
+ *   2) Y 轴强制包含 0 基线：全正数时底部就是 0，有负数时取 min(0, 最低值)，
+ *      换算比例 = 资产 / 最高值，直观体现"从 0 开始积累"；
+ *   3) 最左端固定一个"起始"锚点（记账史开始前的资产总和，从零起步就是 0），
+ *      曲线永远从左端连过来，刷新页面也不会凭空从中间开始画。 */
+var lineAnchorCache = { ver: -1, v: 0 };
+function lineAnchorValue() {
+  if (lineAnchorCache.ver !== txVersion) {
+    var sum = 0;
+    for (var i = 0; i < transactions.length; i++) sum += txEffect(transactions[i]);
+    var v = staticNet() - sum;
+    lineAnchorCache = { ver: txVersion, v: Math.abs(v) < 0.005 ? 0 : round2(v) };
+  }
+  return lineAnchorCache.v;
+}
+/* 轴刻度：0 显示为 "0"，其余走 shortMoney（万/整数） */
+function axisMoney(v) {
+  return Math.abs(v) < 0.005 ? '0' : shortMoney(v);
+}
+/* 圆角矩形路径（药丸标签底） */
+function roundRectPath(ctx, x, y, w, h, r) {
+  var rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}
+
 function drawLineChart() {
   var cv = $('lineChart');
   if (!cv || !cv.clientWidth) return;
   var p = prepareCanvas(cv), ctx = p.ctx, W = p.w, H = p.h;
-  var padL = 8, padR = 54, padT = 10, padB = 16;
-  var plotW = W - padL - padR, plotH = H - padT - padB;
+  var padL = 8, padT = 10, padB = 16;
   var data = assetHistory;
-
   var tc = chartTheme();
+
   ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
   if (data.length < 2) {
     ctx.fillStyle = tc.axis2;
@@ -1302,55 +1394,145 @@ function drawLineChart() {
     return;
   }
 
-  var vals = data.map(function (d) { return d.v; });
-  var vmin = Math.min.apply(null, vals), vmax = Math.max.apply(null, vals);
-  if (vmax - vmin < 0.5) vmax = vmin + 0.5;
-  var pad = (vmax - vmin) * 0.12;
-  vmin -= pad; vmax += pad;
+  /* ---- 1. Y 轴取值：围绕最近 200 秒的"流动窗口" ----
+   * 不再把 0 强行纳入范围：资产基数大、每秒增量小时，0 基线会把曲线压成顶部的一条死平线。
+   * 规则：取窗口内极值；若跨度不足 5 元，以最新值为中心强制 ±2.5（并保证包住所有点），
+   * 让微小的"阶梯式"上涨占满画面、清晰可见。
+   * 起始锚点可能落在范围之外，绘制时会钳到画布边缘（虚线从边缘引入）。 */
+  var vLo = Infinity, vHi = -Infinity;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i].v < vLo) vLo = data[i].v;
+    if (data[i].v > vHi) vHi = data[i].v;
+  }
+  var lastV = data[data.length - 1].v;
+  var MIN_SPAN = 5;                                          // 最小可视跨度（元）
+  if (vHi - vLo < MIN_SPAN) {
+    vmin = Math.min(vLo, lastV - MIN_SPAN / 2);              // 最新值 ±2.5 为核心
+    vmax = Math.max(vHi, lastV + MIN_SPAN / 2);
+  } else {
+    var padSpan = (vHi - vLo) * 0.1;                         // 正常波动：上下各留 10%
+    vmin = vLo - padSpan;
+    vmax = vHi + padSpan;
+  }
   var span = vmax - vmin;
 
-  function X(i) { return padL + i / (data.length - 1) * plotW; }
+  /* ---- 2. 右侧留白：按刻度与标签文字实测宽度算，杜绝数字被切断 ---- */
+  var tagFont = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.font = tagFont;
+  var tagText = money(lastV);
+  var tagCap = Math.max(58, Math.min(W * 0.34, 124));       // 标签最宽不超过画布 1/3
+  if (ctx.measureText(tagText).width + 14 > tagCap) tagText = '¥' + shortMoney(lastV);
+  if (ctx.measureText(tagText).width + 14 > tagCap) tagText = shortMoney(lastV);
+  var tagW = ctx.measureText(tagText).width + 14;
+
+  var axisFont = '9px -apple-system, sans-serif';
+  ctx.font = axisFont;
+  var axisW = Math.max(
+    ctx.measureText(axisMoney(vmax)).width,
+    ctx.measureText(axisMoney((vmax + vmin) / 2)).width,
+    ctx.measureText(axisMoney(vmin)).width
+  );
+  var padR = Math.max(Math.ceil(axisW) + 10, Math.ceil(tagW) + 8, 40);
+  var plotW = W - padL - padR, plotH = H - padT - padB;
+
+  /* ---- 3. X 轴：最左 10%（最多 48px）留给"起始 → 第一个实时点"的过渡段 ---- */
+  var anchorX = padL;
+  var curveX = padL + Math.min(plotW * 0.1, 48);
+  var curveW = padL + plotW - curveX;
+  function X(n) { return curveX + n / (data.length - 1) * curveW; }
   function Y(v) { return padT + (1 - (v - vmin) / span) * plotH; }
 
+  // 起始锚点：值可能在新窗口范围之外，钳到画布上下边缘，虚线从边缘引入
+  var anchorV = lineAnchorValue();
+  var anchorPt = { x: anchorX, y: Math.max(padT, Math.min(padT + plotH, Y(anchorV))) };
+  var pts = [];
+  for (var j = 0; j < data.length; j++) pts.push({ x: X(j), y: Y(data[j].v) });
+  var last = pts[pts.length - 1];
+
+  // 实时金额药丸的几何位置（先算好，后面的刻度文字要避让它）
+  var tagH = 16;
+  var tagX = padL + plotW + 3;
+  var tagY = Math.max(padT, Math.min(padT + plotH - tagH, last.y - tagH / 2));
+
+  /* ---- 网格 / 0 基线 / 右侧刻度 ---- */
   ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   for (var g = 0; g <= 2; g++) {
     var gy = padT + g / 2 * plotH;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
   }
-
-  var pts = data.map(function (d, i) { return { x: X(i), y: Y(d.v) }; });
-
-  function traceLine() {
+  // 0 基线略微加重，强调"从底部往上积累"的起点
+  if (Math.abs(vmin) < 0.005) {
+    ctx.strokeStyle = tc.flat;
     ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (var i = 1; i < pts.length - 1; i++) {
-      var mx = (pts[i].x + pts[i + 1].x) / 2;
-      var my = (pts[i].y + pts[i + 1].y) / 2;
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
-    }
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+    ctx.moveTo(padL, padT + plotH);
+    ctx.lineTo(padL + plotW, padT + plotH);
+    ctx.stroke();
   }
+  ctx.font = axisFont;
+  ctx.fillStyle = tc.axis;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (var g2 = 0; g2 <= 2; g2++) {
+    var vy = padT + g2 / 2 * plotH;
+    var ly = Math.max(padT + 5, Math.min(padT + plotH - 5, vy));
+    // 与实时金额药丸重叠的刻度省略不画，避免文字叠字
+    if (ly + 7 > tagY && ly - 7 < tagY + tagH) continue;
+    var lv = g2 === 0 ? vmax : (g2 === 1 ? (vmax + vmin) / 2 : vmin);
+    ctx.fillText(axisMoney(lv), W - 2, ly);
+  }
+  ctx.textBaseline = 'alphabetic';
 
+  /* ---- 面积：从起始锚点铺到底部，整片渐变 ---- */
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   grad.addColorStop(0, tc.fillTop);
   grad.addColorStop(1, tc.fillBottom);
-  traceLine();
-  ctx.lineTo(pts[pts.length - 1].x, padT + plotH);
-  ctx.lineTo(pts[0].x, padT + plotH);
+  ctx.beginPath();
+  ctx.moveTo(anchorPt.x, anchorPt.y);
+  ctx.lineTo(pts[0].x, pts[0].y);
+  for (var k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);   // 直线连接：阶梯式上涨不被平滑抹掉
+  ctx.lineTo(last.x, padT + plotH);
+  ctx.lineTo(anchorPt.x, padT + plotH);
   ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
-  traceLine();
+  /* ---- 起始段：虚线弱化，读作"历史/起点段" ---- */
+  ctx.save();
+  ctx.globalAlpha = .5;
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = tc.line;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(anchorPt.x, anchorPt.y);
+  ctx.lineTo(pts[0].x, pts[0].y);
+  ctx.stroke();
+  ctx.restore();
+
+  /* ---- 实时段：实线（直线段连接，保留每个秒级阶梯） + 圆头 ---- */
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (var k2 = 1; k2 < pts.length; k2++) ctx.lineTo(pts[k2].x, pts[k2].y);
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.stroke();
 
-  var last = pts[pts.length - 1];
-  var lastV = data[data.length - 1].v;
+  /* ---- 起始锚点：空心小圆 + "起始"字样 ---- */
+  ctx.beginPath();
+  ctx.arc(anchorPt.x, anchorPt.y, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = tc.bodyBg;
+  ctx.fill();
+  ctx.strokeStyle = tc.axis2;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  ctx.fillStyle = tc.axis2;
+  ctx.font = axisFont;
+  ctx.textAlign = 'left';
+  ctx.fillText('起始', anchorPt.x, H - 4);
+
+  /* ---- 末端圆点 ---- */
   ctx.beginPath();
   ctx.arc(last.x, last.y, 3, 0, Math.PI * 2);
   ctx.fillStyle = tc.line;
@@ -1359,15 +1541,16 @@ function drawLineChart() {
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
+  /* ---- 实时金额：画在右侧留白里的药丸标签（既不裁切，也不压住曲线） ---- */
+  roundRectPath(ctx, tagX, tagY, tagW, tagH, 5);
   ctx.fillStyle = tc.line;
-  ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fill();
+  ctx.fillStyle = tc.dark ? '#0f1216' : '#ffffff';
+  ctx.font = tagFont;
   ctx.textAlign = 'left';
-  ctx.fillText('¥' + lastV.toFixed(2), Math.min(last.x + 6, W - padR + 2), Math.max(12, last.y - 6));
-
-  ctx.fillStyle = tc.axis;
-  ctx.font = '9px -apple-system, sans-serif';
-  ctx.fillText(shortMoney(vmax), W - padR + 6, padT + 6);
-  ctx.fillText(shortMoney(vmin), W - padR + 6, padT + plotH);
+  ctx.textBaseline = 'middle';
+  ctx.fillText(tagText, tagX + 7, tagY + tagH / 2 + 0.5);
+  ctx.textBaseline = 'alphabetic';
 }
 
 /* 图二：资产日 K 线（按天聚合，数据源为虚拟资产）
@@ -1402,7 +1585,7 @@ function virtualAt(t, baseNet, settleTs, todayStart) {
  * 历史日 K 线只在「流水变动 / 账户变动 / 跨天」时全量重建（单次正序遍历 O(N log N)）；
  * 每秒刷新直接命中缓存，只实时计算"今天"一根蜡烛（O(1)），
  * 避免流水很多时每秒全量遍历导致手机卡顿。 */
-var cachedCandles = [];      // 今天之前的历史日 K 缓存
+var cachedCandles = [];      // 今天之前的历史日 K 缓存（绝对金额，绘制时才换算成 %）
 var cachedToday = { open: 0, hi: -Infinity, lo: Infinity };  // 今天蜡烛的缓存部分
 var candleVer = -1;          // 上次重建时的 txVersion
 var candleDay = '';          // 上次重建时的"今天"（跨天失效）
@@ -1449,7 +1632,17 @@ function rebuildCandleCache(today, baseNet, settleTs, todayStart) {
   cachedToday = { open: tOpen, hi: tHi, lo: tLo };
 }
 
-/* 构建全部日 K 数据（按日期升序，今天固定在最后；历史日走缓存） */
+/* 构建全部日 K 数据（按日期升序，今天固定在最后；历史日走缓存）
+ * 【日环比逻辑】
+ *   - 开盘 = 昨日收盘资产（时间线本身保证两者严格相等，链式滚动）；
+ *     图表最左侧的第一天没有"昨天" → 昨收参照 = 基准资产 klineBase()；
+ *   - 涨幅 = (当日资产 - 昨收) / |昨收| × 100%，分母恒取绝对值，
+ *     负资产区间同样成立：昨收 -39000 → 今天 -38700 = +0.77%（资产增加）；
+ *   - 红绿 = 当日收盘资产 与 昨收 的绝对金额比较（与涨幅%严格同向）。
+ * 每根蜡烛携带：
+ *   绝对金额 open/high/low/close（元，悬停框展示真实资产与昨收）
+ *   日环比百分比 pOpen/pHigh/pLow/pClose（%，开盘恒为 0%，Y 轴与蜡烛绘制用）
+ *   prevClose：本日的"昨收"参照金额（悬停框展示） */
 function buildDailyCandles(now) {
   var today = todayStr(new Date(now));
   // 缓存失效：流水/账户变动（txVersion）或跨天 → 才全量重建历史
@@ -1464,12 +1657,53 @@ function buildDailyCandles(now) {
   // 今天：每秒只有 Close 变化（O(1) 组装）
   var open = cachedToday.open;
   var close = currentVirtualAsset;
-  return cachedCandles.concat([{
+  var raw = [initCandle()].concat(cachedCandles, [{
     key: today, label: '今天', isToday: true,
     open: open, close: close,
     high: Math.max(open, close, cachedToday.hi),
     low: Math.min(open, close, cachedToday.lo)
   }]);
+
+  // 链式换算：从"初始"锚点开始逐日滚动"昨收"
+  var prev = klineBase();
+  return raw.map(function (c) {
+    if (c.isInit) {
+      // 第一根真实日的"昨收" = 基准资产（没有昨天的昨天）
+      prev = c.close;
+      return {
+        key: c.key, label: c.label, isToday: false, isInit: true,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        prevClose: null, pOpen: 0, pHigh: 0, pLow: 0, pClose: 0
+      };
+    }
+    // 日环比：开盘强制 = 昨收。时间线天然满足 open == 昨收，
+    // 只有"最左日 + 手动基准与真实起始资产不符"时会把开盘对齐到基准（跳空归属基准）。
+    var o = prev;
+    var hi = Math.max(c.high, o), lo = Math.min(c.low, o), cl = c.close;
+    var ref = prev;   // 本日涨跌幅的分母（昨收，恒取 |ref|）
+    var g = function (v) {
+      if (!isFinite(ref) || Math.abs(ref) < 0.005) return 0;   // 昨收≈0 的极端兜底
+      return (v - ref) / Math.abs(ref) * 100;
+    };
+    prev = cl;   // 明天的"昨收" = 今天的收盘
+    return {
+      key: c.key, label: c.label, isToday: !!c.isToday, isInit: false,
+      open: o, high: hi, low: lo, close: cl, prevClose: ref,
+      pOpen: g(o), pHigh: g(hi), pLow: g(lo), pClose: g(cl)
+    };
+  });
+}
+
+/* ---------- "初始"锚点蜡烛 ----------
+ * 永远强行插在数据数组最左侧，O = H = L = C = 基准资产（Base），涨幅天然 0%。
+ * 它扮演"第一天的昨天"：最左侧真实日的开盘与涨跌幅分母都来自它；
+ * 同时是整张图 0% 虚线的水平参照，历史长了会被可视窗口自然挤出。 */
+function initCandle() {
+  var v = klineBase();
+  return {
+    key: '__init__', label: '初始', isToday: false, isInit: true,
+    open: v, close: v, high: v, low: v
+  };
 }
 
 function dayStartOf(ts) {
@@ -1481,44 +1715,66 @@ function drawKlineChart(nowMs) {
   var cv = $('klineChart');
   if (!cv || !cv.clientWidth) return;
   var p = prepareCanvas(cv), ctx = p.ctx, W = p.w, H = p.h;
-  var padL = 8, padR = 50, padT = 10, padB = 16;
-  var plotW = W - padL - padR, plotH = H - padT - padB;
+  var padL = 8, padT = 10, padB = 16;
 
   var tc = chartTheme();
   var all = buildDailyCandles(nowMs || Date.now());
   if (!all.length) return;
 
-  // 横向自适应显示天数：窄屏 7 天，宽屏最多 15 天
-  var maxN = Math.max(4, Math.min(15, Math.floor(plotW / 42)));
+  // 横向自适应显示天数：窄屏 7 天，宽屏最多 15 天（右边距先按估值预留，下面再按刻度文字精算）
+  var maxN = Math.max(4, Math.min(15, Math.floor((W - padL - 56) / 42)));
   var candles = all.slice(-maxN);
+  // "初始"锚点：历史长了会被可视窗口自然挤出，只有真的在窗口里才计入天数
+  var hasInit = !!(candles[0] && candles[0].isInit);
   var spanEl = $('klineSpan');
   if (spanEl) {
-    spanEl.textContent = '最近 ' + candles.length + ' 日（' +
+    spanEl.textContent = '最近 ' + (candles.length - (hasInit ? 1 : 0)) + ' 日（' +
       candles[0].label + ' ~ ' + candles[candles.length - 1].label + '）';
   }
 
-  // Y 轴自适应：这几天的最高价 / 最低价
-  var gMin = Infinity, gMax = -Infinity;
+  /* ---- Y 轴：按图内最高 / 最低涨幅自适应，0% 永远在范围内 ----
+   * 出现 +1000% 这种极端行情时，轴自动拉伸到千级，
+   * 普通 +1% 的日子被压缩成贴近平盘的短线 —— 这是刻意保留的真实压缩感。 */
+  var gMin = 0, gMax = 0;
   candles.forEach(function (c) {
-    if (c.high > gMax) gMax = c.high;
-    if (c.low < gMin) gMin = c.low;
+    if (c.pHigh > gMax) gMax = c.pHigh;
+    if (c.pLow < gMin) gMin = c.pLow;
   });
-  if (gMax - gMin < 0.5) gMax = gMin + 0.5;
-  var padV = (gMax - gMin) * 0.1;
-  var yMax = gMax + padV, yMin = gMin - padV, ySpan = yMax - yMin;
+  var rawSpan = gMax - gMin;
+  if (rawSpan < 0.5) {                        // 全平盘：给 0.5% 的可视高度，避免除零
+    var mid = (gMax + gMin) / 2;
+    gMax = mid + 0.25; gMin = mid - 0.25; rawSpan = 0.5;
+  }
+  var padP = rawSpan * 0.08;                  // 上下各留 8% 空白，最高那根柱子不会被截断
+  var yMax = gMax + padP, yMin = gMin - padP, ySpan = yMax - yMin;
+
+  /* ---- 右侧刻度：先实测 "+1050%" 这类文字的宽度，再决定 padR，任何值都不会被切 ---- */
+  ctx.font = '9px -apple-system, sans-serif';
+  var ticks = [yMax, (yMax + yMin) / 2, yMin];
+  var tickW = 0;
+  ticks.forEach(function (v) {
+    var w2 = ctx.measureText(pctText(v)).width;
+    if (w2 > tickW) tickW = w2;
+  });
+  var padR = Math.max(40, Math.ceil(tickW) + 12);
+  var plotW = W - padL - padR, plotH = H - padT - padB;
 
   function Y(v) { return padT + (1 - (v - yMin) / ySpan) * plotH; }
-  var slot = plotW / candles.length;
+
+  // 蜡烛槽位：天数少时（例如"初始 + 今天"只有 2 根）限制单根最大宽度并整体居中，
+  // 避免两根柱子被拉到屏幕左右两端显得空荡
+  var slot = Math.min(plotW / candles.length, 56);
   var bodyW = Math.max(4, Math.min(26, slot * 0.55));
-  klineGeom = { padL: padL, slot: slot, n: candles.length };
+  var x0 = padL + (plotW - slot * candles.length) / 2;   // 第一根蜡烛槽位的左边缘
+  klineGeom = { padL: x0, slot: slot, n: candles.length };
 
   // 悬停背景条（先画，垫底）
   if (klineHover >= 0 && klineHover < candles.length) {
     ctx.fillStyle = tc.hover;
-    ctx.fillRect(padL + slot * klineHover, padT, slot, plotH);
+    ctx.fillRect(x0 + slot * klineHover, padT, slot, plotH);
   }
 
-  // 网格与右侧金额刻度
+  // 网格 + 右侧百分比刻度
   ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   ctx.font = '9px -apple-system, sans-serif';
@@ -1527,19 +1783,32 @@ function drawKlineChart(nowMs) {
   for (var g2 = 0; g2 <= 2; g2++) {
     var gy = padT + g2 / 2 * plotH;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
-    ctx.fillText(shortMoney(yMax - g2 / 2 * ySpan), padL + plotW + 6, gy + 3);
+    ctx.fillText(pctText(ticks[g2]), padL + plotW + 6, gy + 3);
   }
+
+  // 0% 基准虚线：整张图的水平参照，"初始"蜡烛正好落在它上面
+  var y0 = Y(0);
+  ctx.save();
+  ctx.strokeStyle = tc.flat;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(padL, y0);
+  ctx.lineTo(padL + plotW, y0);
+  ctx.stroke();
+  ctx.restore();
 
   // 蜡烛：阳线红空心 / 阴线绿实心 / 平盘灰细线
   candles.forEach(function (c, i) {
-    var cx = padL + slot * (i + 0.5);
-    var yH = Y(c.high), yL = Y(c.low), yO = Y(c.open), yC = Y(c.close);
-    var up = c.close >= c.open - 0.005;
-    var flat = Math.abs(c.close - c.open) <= 0.005 && Math.abs(c.high - c.low) <= 0.005;
+    var cx = x0 + slot * (i + 0.5);
+    var yH = Y(c.pHigh), yL = Y(c.pLow), yO = Y(c.pOpen), yC = Y(c.pClose);
+    var up = c.close >= c.open;   // 红绿严格按绝对资产金额比较（涨幅%与资产同向，但金额比较更直白、永不出错）
+    var flat = Math.abs(c.pClose - c.pOpen) <= 0.005 && Math.abs(c.pHigh - c.pLow) <= 0.005;
 
     if (flat) {
-      ctx.strokeStyle = tc.flat;
-      ctx.lineWidth = 1.5;
+      // 平盘（含"初始"基准蜡烛）：一根横线，初始用深一点的颜色做锚点
+      ctx.strokeStyle = c.isInit ? tc.axis : tc.flat;
+      ctx.lineWidth = c.isInit ? 2 : 1.5;
       ctx.beginPath();
       ctx.moveTo(cx - Math.min(8, slot * 0.3), yC);
       ctx.lineTo(cx + Math.min(8, slot * 0.3), yC);
@@ -1579,24 +1848,44 @@ function drawKlineChart(nowMs) {
   var step = candles.length > 8 ? 2 : 1;
   candles.forEach(function (c, i) {
     if (i % step === 0 || i === candles.length - 1) {
-      ctx.fillText(c.label, padL + slot * (i + 0.5), H - 4);
+      ctx.fillText(c.label, x0 + slot * (i + 0.5), H - 4);
     }
   });
 
-  // 悬停 / 点按信息框：日期 + 开高低收
+  // 悬停 / 点按信息框：日期 + 涨幅% + 真实资产 + 开高低
   if (klineHover >= 0 && klineHover < candles.length) {
     var c2 = candles[klineHover];
-    var up2 = c2.close >= c2.open;
-    var lines = [
-      { t: c2.isToday ? '今天 ' + c2.key : c2.key, c: '#ffffff' },
-      { t: '开 ' + money(c2.open), c: '#d1d5db' },
-      { t: '高 ' + money(c2.high), c: '#fca5a5' },
-      { t: '低 ' + money(c2.low), c: '#86efac' },
-      { t: '收 ' + money(c2.close) + (up2 ? ' ↑' : ' ↓'), c: up2 ? '#fca5a5' : '#86efac' }
-    ];
-    var bw = 118, bh = lines.length * 14 + 10;
-    var cx2 = padL + slot * (klineHover + 0.5);
-    var bx = Math.min(Math.max(padL + 2, cx2 + 10), W - bw - 4);
+    var up2 = c2.close >= c2.open;   // 与蜡烛红绿同一把尺：绝对资产金额
+    var lines;
+    if (c2.isInit) {
+      // "初始"锚点：涨幅天然 0%，只交代它代表基准
+      lines = [
+        { t: '初始 · 基准日', c: '#ffffff' },
+        { t: '涨幅 0%（参照线）', c: '#d1d5db' },
+        { t: '基准 ' + money(c2.close), c: '#9ca3af' }
+      ];
+    } else {
+      var ref2 = (c2.prevClose === null || c2.prevClose === undefined) ? klineBase() : c2.prevClose;
+      lines = [
+        { t: c2.isToday ? '今天 ' + c2.key : c2.key, c: '#ffffff' },
+        { t: '涨幅 ' + pctText(c2.pClose) + (up2 ? ' ↑' : ' ↓'), c: up2 ? '#fca5a5' : '#86efac' },
+        { t: '收 ' + money(c2.close), c: '#d1d5db' },
+        { t: '昨收 ' + money(ref2), c: '#9ca3af' },
+        { t: '开 ' + pctText(c2.pOpen) + '  高 ' + pctText(c2.pHigh), c: '#9ca3af' },
+        { t: '低 ' + pctText(c2.pLow) + '  收 ' + pctText(c2.pClose), c: '#9ca3af' }
+      ];
+    }
+    // 框宽按最长一行实测，避免"+1000%"这类长文本溢出
+    ctx.font = '10px -apple-system, sans-serif';
+    var bw = 0;
+    lines.forEach(function (ln) {
+      var tw = ctx.measureText(ln.t).width;
+      if (tw > bw) bw = tw;
+    });
+    bw = Math.min(W - 8, Math.max(100, Math.ceil(bw) + 16));
+    var bh = lines.length * 14 + 10;
+    var cx2 = x0 + slot * (klineHover + 0.5);
+    var bx = Math.min(Math.max(2, cx2 + 10), W - bw - 4);
     var by = padT + 4;
 
     ctx.fillStyle = tc.tipBg;
@@ -1627,8 +1916,8 @@ function klineHit(clientX, cv) {
   if (!klineGeom) return -1;
   var rect = cv.getBoundingClientRect();
   var x = clientX - rect.left;
-  var plotW = cv.clientWidth - 8 - 50;
-  if (x < klineGeom.padL || x > klineGeom.padL + plotW) return -1;
+  var groupW = klineGeom.slot * klineGeom.n;   // 蜡烛组的实际宽度（居中后可能窄于绘图区）
+  if (x < klineGeom.padL || x > klineGeom.padL + groupW) return -1;
   var i = Math.floor((x - klineGeom.padL) / klineGeom.slot);
   return Math.max(0, Math.min(klineGeom.n - 1, i));
 }
@@ -2115,6 +2404,7 @@ var mask = $('settingsMask');
 var editingAccountId = null;
 
 function openSettings() {
+  $('sBaseAsset').value = round2(klineBase());
   $('sSalaryMode').value = settings.salaryMode;
   $('sSalaryValue').value = settings.salaryValue;
   $('sStart').value = settings.startTime;
@@ -2199,6 +2489,23 @@ syncThemeBtn();
 $('btnSettings').addEventListener('click', openSettings);
 $('btnCloseSettings').addEventListener('click', function () { mask.classList.remove('show'); });
 mask.addEventListener('click', function (e) { if (e.target === mask) mask.classList.remove('show'); });
+
+/* ---------- 日 K 涨幅基准：保存后立刻按新的 0% 线重算 ---------- */
+$('btnBaseFromNet').addEventListener('click', function () {
+  var net = round2(staticNet());          // 真实账户余额之和（不含虚拟工资）
+  $('sBaseAsset').value = (Math.abs(net) > 0.005) ? net : 6300;
+});
+$('btnSaveBase').addEventListener('click', function () {
+  var v = parseFloat($('sBaseAsset').value);
+  if (!(v > 0)) { alert('基准资产需大于 0'); return; }
+  settings.baseAsset = round2(v);
+  settings.baseAssetManual = true;        // 标记为手动指定，不再自动推导
+  saveJSON(K_SET, settings);
+  klineHover = -1;                        // 基准变了，旧的悬停索引可能失效
+  renderNav();
+  drawKlineChart();
+  alert('基准资产已设为 ' + money(settings.baseAsset) + '\nK 线最左一天的昨收参照（0% 线）已按新基准重算');
+});
 
 /* 保存计薪设置 */
 $('btnSaveSettings').addEventListener('click', function () {
@@ -2423,9 +2730,9 @@ $('fileInput').addEventListener('change', function (e) {
         };
       });
       settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-      if (!data.settings || data.settings.baseAsset === undefined) {
-        var snImp = staticNet();   // 旧备份无基准字段：以导入后的资产为基准
-        settings.baseAsset = (Math.abs(snImp) > 0.005) ? snImp : 10000;
+      if (!data.settings || !(Number(settings.baseAsset) > 0)) {
+        settings.baseAsset = 6300;        // 旧备份没有基准字段：回落到默认 6300
+        settings.baseAssetManual = false; // 未手动指定 → 仍走自动推导
       }
       if (settings.creditAccountId && !getAcc(settings.creditAccountId)) {
         var firstAsset = accounts.filter(function (a) { return a.type === 'asset'; })[0];
