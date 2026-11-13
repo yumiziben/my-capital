@@ -153,6 +153,7 @@
   }
   .donut-center .t { font-size: 11px; color: var(--sub); }
   .donut-center .a { font-size: 15px; font-weight: 700; margin-top: 1px; }
+  .donut-center .s { font-size: 9px; color: var(--faint); margin-top: 2px; white-space: nowrap; }
   .legend { flex: 1; min-width: 0; }
   .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 5px 0; }
   .dot { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
@@ -484,8 +485,9 @@
           <div class="donut-box">
             <svg id="donutSvg" viewBox="0 0 120 120"></svg>
             <div class="donut-center">
-              <div class="t">资产分布</div>
+              <div class="t">真实净资产</div>
               <div class="a num" id="donutTotal">¥0</div>
+              <div class="s">（不含实时工资）</div>
             </div>
           </div>
           <div class="legend" id="legend"></div>
@@ -786,7 +788,12 @@ function loadJSON(key, fb) {
   try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : fb; }
   catch (e) { return fb; }
 }
-function saveJSON(key, v) { localStorage.setItem(key, JSON.stringify(v)); }
+/* K 线缓存版本号：流水或账户数据落盘时自增，驱动历史日 K 缓存失效重建 */
+var txVersion = 0;
+function saveJSON(key, v) {
+  localStorage.setItem(key, JSON.stringify(v));
+  if (key === K_TX || key === K_ACC) txVersion++;   // 流水/账户变动 → K 线缓存失效
+}
 
 var accounts = loadJSON(K_ACC, null);
 var transactions = loadJSON(K_TX, []);
@@ -1010,7 +1017,7 @@ function settleTodaySalary() {
   if (settledToday(now.getTime())) { alert('今天已经落袋过啦'); return; }
   var pay = round2(earnedRaw(now.getTime()));
   if (!(pay > 0)) { alert('当前不在计薪时段内，暂时没有可落袋的工资'); return; }
-  var tx = createIncomeTx(pay, now, '今日工资落袋');
+  var tx = createIncomeTx(pay, now, '今日工资入账');
   if (!tx) { alert('落袋失败，请检查工资账户设置'); return; }
   settle = { date: todayStr(now), settled: true, ts: now.getTime(), txId: tx.id, amount: pay };
   saveJSON(K_SETTLE, settle);
@@ -1030,15 +1037,19 @@ function checkDayRollover() {
   if (settle.date === t) return;
 
   // 结算前一天（若未落袋且开启了自动增资）
+  var settled = false;
   if (!settle.settled && settings.autoAccrual) {
     var pay = round2(fullDayPay());
     if (pay > 0) {
       var d = new Date(settle.date + 'T23:59:59');
       createIncomeTx(pay, d, '昨日工资自动结算', '工资');
+      settled = true;
     }
   }
   settle = { date: t, settled: false, ts: null, txId: null, amount: 0 };
   saveJSON(K_SETTLE, settle);
+  // 跨天结算改动了账户余额并新增流水：整页刷新一次（含环形图与流水列表）
+  if (settled) renderAll();
 }
 
 /* =========================================================
@@ -1100,7 +1111,7 @@ function renderDashboard() {
 
   renderNav();      // K 线左上角实时净值（随工资每秒跳动）
 
-  renderDonut();
+  // 环形图已移出秒级刷新：只随记账/落袋/账户变更（renderAll）重绘
 
   // 折线采样 + 双图重绘
   pushHistory(currentVirtualAsset);
@@ -1121,11 +1132,12 @@ function renderDonut() {
   var totalLiab = liabs.reduce(function (s, a) { return s + a.balance; }, 0);
   var total = totalAsset + totalLiab;   // 总盘子 = 资产 + 负债（绝对值）
 
-  // 中心金额强制对齐顶部"总净资产"：直接渲染同一变量 currentVirtualAsset
-  // （含实时工资、已扣支出，带正负号如 ¥-1,078.57），与顶部大字绝对一致；
+  // 中心金额 = 真实账户总余额（staticNet：所有账户 balance 资产减负债，不含虚拟工资）
+  // 只随记账 / 删除流水 / 工资落袋 / 账户变更（renderAll）刷新，不随秒级跳动；
   // 色块比例仍按（资产绝对值 + 负债绝对值）绘制
-  $('donutTotal').textContent = money(currentVirtualAsset);
-  $('donutTotal').style.color = currentVirtualAsset < 0 ? 'var(--red)' : '';
+  var realNet = staticNet();
+  $('donutTotal').textContent = money(realNet);
+  $('donutTotal').style.color = realNet < 0 ? 'var(--red)' : '';
 
   // 每个账户一个扇区：{ 账户, 金额(绝对值), 是否负债, 分配的颜色 }
   var items = assets.map(function (a, i) {
@@ -1386,50 +1398,78 @@ function virtualAt(t, baseNet, settleTs, todayStart) {
   return v;
 }
 
-/* 构建全部日 K 数据（按日期升序，今天固定在最后） */
+/* ---------- K 线缓存 ----------
+ * 历史日 K 线只在「流水变动 / 账户变动 / 跨天」时全量重建（单次正序遍历 O(N log N)）；
+ * 每秒刷新直接命中缓存，只实时计算"今天"一根蜡烛（O(1)），
+ * 避免流水很多时每秒全量遍历导致手机卡顿。 */
+var cachedCandles = [];      // 今天之前的历史日 K 缓存
+var cachedToday = { open: 0, hi: -Infinity, lo: Infinity };  // 今天蜡烛的缓存部分
+var candleVer = -1;          // 上次重建时的 txVersion
+var candleDay = '';          // 上次重建时的"今天"（跨天失效）
+
+/* 全量重建：后缀和 + 单次正序遍历，构建历史各日蜡烛与今天快照极值 */
+function rebuildCandleCache(today, baseNet, settleTs, todayStart) {
+  var txs = transactions.slice().sort(function (a, b) { return a.ts - b.ts; });
+  var n = txs.length;
+  var suffix = new Array(n + 1);          // suffix[j] = 第 j 笔及之后所有流水的净资产影响
+  suffix[n] = 0;
+  for (var i = n - 1; i >= 0; i--) suffix[i] = suffix[i + 1] + txEffect(txs[i]);
+
+  var hist = [];
+  var tOpen = baseNet, tHi = -Infinity, tLo = Infinity, hasToday = false;
+  var curKey = null, cur = null;
+
+  for (var j = 0; j <= n; j++) {
+    var tx = j < n ? txs[j] : null;
+    var k = tx ? (tx.date || todayStr(new Date(tx.ts))) : null;
+    if (cur && (j === n || k !== curKey)) {
+      // 关闭当前日期组：收盘 = 组末尾资产（即下一笔流水发生前的资产）
+      cur.close = baseNet - suffix[j];
+      if (cur.close > cur.high) cur.high = cur.close;
+      if (cur.close < cur.low) cur.low = cur.close;
+      if (curKey === today) { tOpen = cur.open; tHi = cur.high; tLo = cur.low; hasToday = true; }
+      else hist.push(cur);
+      cur = null;
+    }
+    if (!tx) break;
+    var groupKey = k >= today ? today : k;   // 防御：异常的未来日期并入今天
+    if (!cur || groupKey !== curKey) {
+      curKey = groupKey;
+      cur = { key: curKey, label: curKey === today ? '今天' : curKey.slice(5), isToday: curKey === today,
+              open: baseNet - suffix[j], high: -Infinity, low: Infinity };
+      cur.high = cur.open; cur.low = cur.open;
+    }
+    var vAfter = baseNet - suffix[j] + txEffect(tx);   // 本笔流水发生后的资产快照
+    if (cur.isToday && tx.ts >= todayStart && tx.ts < settleTs) vAfter += earnedRaw(tx.ts + 1);
+    if (vAfter > cur.high) cur.high = vAfter;
+    if (vAfter < cur.low) cur.low = vAfter;
+  }
+  if (!hasToday) { tOpen = baseNet; tHi = -Infinity; tLo = Infinity; }
+  cachedCandles = hist;
+  cachedToday = { open: tOpen, hi: tHi, lo: tLo };
+}
+
+/* 构建全部日 K 数据（按日期升序，今天固定在最后；历史日走缓存） */
 function buildDailyCandles(now) {
-  var baseNet = staticNet();
-  var settleTs = (settle && settle.settled) ? settle.ts : Infinity;
-
-  // 按日期分组流水
-  var byDay = {};
-  transactions.forEach(function (tx) {
-    var k = tx.date || todayStr(new Date(tx.ts));
-    if (!byDay[k]) byDay[k] = [];
-    byDay[k].push(tx);
-  });
-
   var today = todayStr(new Date(now));
-  var days = Object.keys(byDay);
-  if (days.indexOf(today) === -1) days.push(today);
-  days.sort();
-
-  var todayStart = dayStartOf(now);
-
-  return days.map(function (k) {
-    var txs = (byDay[k] || []).slice().sort(function (a, b) { return a.ts - b.ts; });
-    var isToday = k === today;
-    var s = dayStartOf(new Date(k + 'T00:00:00').getTime());   // 当天 0 点
-    var e = isToday ? now : s + 86400000;                       // 当天末尾
-
-    var open = virtualAt(s, baseNet, settleTs, todayStart);
-    // 今天：收盘直接用实时总资产（每秒跳动）；历史日：0 点后至当天末尾
-    var close = isToday ? currentVirtualAsset : virtualAt(e, baseNet, settleTs, todayStart);
-    var hi = Math.max(open, close);
-    var lo = Math.min(open, close);
-
-    // 每笔流水发生后的资产快照，纳入最高/最低
-    txs.forEach(function (tx) {
-      var v = virtualAt(tx.ts + 1, baseNet, settleTs, todayStart);
-      if (v > hi) hi = v;
-      if (v < lo) lo = v;
-    });
-
-    return {
-      key: k, label: isToday ? '今天' : k.slice(5), isToday: isToday,
-      open: open, close: close, high: hi, low: lo
-    };
-  });
+  // 缓存失效：流水/账户变动（txVersion）或跨天 → 才全量重建历史
+  if (candleVer !== txVersion || candleDay !== today) {
+    var baseNet = staticNet();
+    var settleTs = (settle && settle.settled) ? settle.ts : Infinity;
+    var todayStart = dayStartOf(now);
+    rebuildCandleCache(today, baseNet, settleTs, todayStart);
+    candleVer = txVersion;
+    candleDay = today;
+  }
+  // 今天：每秒只有 Close 变化（O(1) 组装）
+  var open = cachedToday.open;
+  var close = currentVirtualAsset;
+  return cachedCandles.concat([{
+    key: today, label: '今天', isToday: true,
+    open: open, close: close,
+    high: Math.max(open, close, cachedToday.hi),
+    low: Math.min(open, close, cachedToday.lo)
+  }]);
 }
 
 function dayStartOf(ts) {
@@ -2419,6 +2459,7 @@ function renderAll() {
   $('todayLabel').textContent = d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() +
                                 '日 星期' + WEEK[d.getDay()];
   renderDashboard();
+  renderDonut();          // 环形图：只在记账/删除流水/落袋/账户变更时重绘
   renderCategoryBreakdown();
   renderTransactions();
   fillAccountOptions();
