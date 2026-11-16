@@ -1412,12 +1412,12 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 /* 图一：今日资产分时（今天 0 点开盘 → 现在，数据源 currentVirtualAsset）
  * 规则：
- *   1) X 轴 = 今天 0 点 → 现在；左下角刻度为"开盘 + 今天第一笔流水或上班时间"
- *      （两者取较早者），右下角为"现在"；
- *   2) 最左侧开盘价经一小段虚线引入，曲线从开盘连到现在，刷新不丢、跨天自动重置；
+ *   1) X 轴 = 今天 00:00（自然日零点）→ 现在，0 点就落在绘图区左边缘；
+ *      左下角刻度固定为"开盘 00:00"，右下角为"现在"——夜间的收支也如实呈现；
+ *   2) 曲线从开盘（0 点资产）连到现在，刷新不丢、跨天自动重置；
  *   3) Y 轴自适应包含今日最高 / 最低点；跨度不足 5 元时以最新值为中心 ±2.5，
  *      微小的工资上涨也占满画面；
- *   4) 贝塞尔中点平滑（面积与实线共用 smoothTo），首尾端点严格贴合真实值；
+ *   4) 纯直线连接（lineTo）：流水跳变垂直砸落、工资缓升如实爬升，绝不平滑篡改走势；
  *   5) 右侧刻度 + 实时金额药丸：留白按文字实测宽度动态计算，任何屏幕不裁切。 */
 function drawLineChart(nowMs) {
   var cv = $('lineChart');
@@ -1482,8 +1482,8 @@ function drawLineChart(nowMs) {
   var padR = Math.max(Math.ceil(axisW) + 10, Math.ceil(tagW) + 8, 40);
   var plotW = W - padL - padR, plotH = H - padT - padB;
 
-  /* ---- 3. X 轴：今天 0 点 → 现在；最左 8%（≤36px）留给开盘虚线引入段 ---- */
-  var leadX = padL + Math.min(plotW * 0.08, 36);
+  /* ---- 3. X 轴：今天 0 点 → 现在（0 点就落在绘图区左边缘，夜间收支也如实呈现） ---- */
+  var leadX = padL;
   var daySpan = Math.max(1, now - todayStart);
   function X(ts) { return leadX + (ts - todayStart) / daySpan * (padL + plotW - leadX); }
   function Y(v) { return padT + (1 - (v - vmin) / span) * plotH; }
@@ -1518,48 +1518,45 @@ function drawLineChart(nowMs) {
   }
   ctx.textBaseline = 'alphabetic';
 
-  /* ---- 平滑贝塞尔路径：以相邻采样点的中点为端点、真实采样点为控制点 ----
-   * 曲线恒过每段中点、始终从开盘点出发、终止于实时点，采样高度不被篡改；
-   * 流水跳变的拐弯处形成圆滑"滑梯"，工资的连续缓升呈现优美弧度。 */
-  function smoothTo() {
-    for (var s = 1; s < pts.length - 1; s++) {
-      var mx = (pts[s].x + pts[s + 1].x) / 2;
-      var my = (pts[s].y + pts[s + 1].y) / 2;
-      ctx.quadraticCurveTo(pts[s].x, pts[s].y, mx, my);
-    }
-    ctx.lineTo(last.x, last.y);
+  /* ---- 折线路径：逐点直线连接（lineTo），忠实还原每一秒的真实资产 ----
+   * 大额负债瞬间入账 → 垂直砸落；工资每秒爬升 → 直线缓升；
+   * 任何平滑算法都会掩盖跳变的真实性，这里一律不用。 */
+  function tracePath() {
+    for (var s = 1; s < pts.length; s++) ctx.lineTo(pts[s].x, pts[s].y);
   }
 
-  /* ---- 面积：从开盘水平线铺到底部，整片渐变（边界走同一条平滑曲线） ---- */
+  /* ---- 面积：从开盘水平线铺到底部，整片渐变（边界走同一条折线） ---- */
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   grad.addColorStop(0, tc.fillTop);
   grad.addColorStop(1, tc.fillBottom);
   ctx.beginPath();
   ctx.moveTo(padL, first.y);
   ctx.lineTo(first.x, first.y);
-  smoothTo();
+  tracePath();
   ctx.lineTo(last.x, padT + plotH);
   ctx.lineTo(padL, padT + plotH);
   ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
-  /* ---- 开盘引入段：虚线弱化，读作"今天从开盘价起步" ---- */
-  ctx.save();
-  ctx.globalAlpha = .5;
-  ctx.setLineDash([3, 3]);
-  ctx.strokeStyle = tc.line;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(padL, first.y);
-  ctx.lineTo(first.x, first.y);
-  ctx.stroke();
-  ctx.restore();
+  /* ---- 开盘引入段：0 点已贴左边缘，只保留极短的虚线提示（无长度时自动不画） ---- */
+  if (first.x > padL + 0.5) {
+    ctx.save();
+    ctx.globalAlpha = .5;
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = tc.line;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(padL, first.y);
+    ctx.lineTo(first.x, first.y);
+    ctx.stroke();
+    ctx.restore();
+  }
 
-  /* ---- 实时段：平滑贝塞尔实线 + 圆头（首尾端点严格贴合真实值） ---- */
+  /* ---- 实时段：直线折线 + 圆头 ---- */
   ctx.beginPath();
   ctx.moveTo(first.x, first.y);
-  smoothTo();
+  tracePath();
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
@@ -1575,23 +1572,11 @@ function drawLineChart(nowMs) {
   ctx.lineWidth = 1.2;
   ctx.stroke();
 
-  /* ---- X 轴刻度：左 = 开盘 + 今天第一笔流水/上班时间（取较早），右 = 现在 ---- */
-  var firstAct = null;
-  transactions.forEach(function (tx) {
-    if (tx.ts >= todayStart && tx.ts <= now && (firstAct === null || tx.ts < firstAct)) firstAct = tx.ts;
-  });
-  if (settings.autoAccrual) {
-    var ws = payBounds(now).start;
-    if (ws >= todayStart && ws <= now && (firstAct === null || ws < firstAct)) firstAct = ws;
-  }
-  function fmtHM(t) {
-    var d = new Date(t);
-    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
-  }
+  /* ---- X 轴刻度：左 = 开盘 00:00（自然日零点），右 = 现在 ---- */
   ctx.fillStyle = tc.axis2;
   ctx.font = axisFont;
   ctx.textAlign = 'left';
-  ctx.fillText('开盘' + (firstAct ? ' ' + fmtHM(firstAct) : ''), padL, H - 4);
+  ctx.fillText('开盘 00:00', padL, H - 4);
   ctx.textAlign = 'right';
   ctx.fillText('现在', padL + plotW, H - 4);
 
