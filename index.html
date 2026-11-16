@@ -508,7 +508,6 @@
         <div class="chart-block">
           <div class="chart-head">
             <div class="card-title">实时资产分时图</div>
-            <div class="chart-legend">最近 200 秒 · 每秒采样（含实时工资）</div>
           </div>
           <canvas id="lineChart" class="chart-canvas"></canvas>
         </div>
@@ -1055,7 +1054,6 @@ function settleTodaySalary() {
   settle = { date: todayStr(now), settled: true, ts: now.getTime(), txId: tx.id, amount: pay };
   saveJSON(K_SETTLE, settle);
   renderAll();
-  pushHistory(currentVirtualAsset);
   drawCharts();
 }
 
@@ -1186,7 +1184,6 @@ function renderDashboard() {
   // 环形图已移出秒级刷新：只随记账/落袋/账户变更（renderAll）重绘
 
   // 折线采样 + 双图重绘
-  pushHistory(currentVirtualAsset);
   drawCharts(now);
 }
 
@@ -1330,12 +1327,35 @@ function chartTheme() {
   };
 }
 
-var assetHistory = [];
-var HISTORY_MAX = 200;
+/* =========================================================
+ *  今日分时：数据源 = 今天 0 点开盘 → 现在
+ *  旧版只保留最近 200 秒的滚动采样数组，一刷新就丢、没有连贯感；
+ *  现在【不存任何历史采样】，每次需要时从流水 + 虚拟工资回放重建：
+ *    - 开盘 = 今天 0 点的资产（昨晚自动结算已计入余额，今天工资/流水从 0 起算）；
+ *    - 分钟级采样 virtualAt()（全天最多 360 档）+ 每笔流水的精确跳变点；
+ *    - 实时点（当前动态总资产）绘制时每秒追加，红绿跳动只影响今天；
+ *    - 跨天自动重置：day 变了整个序列重建，天然从新一天 0 点开始画。
+ *  日 K 线继续承载长期历史趋势，两者互不影响。
+ * ========================================================= */
+var todaySeries = { day: '', ver: -1, min: -1, pts: [] };   // 分钟级采样缓存（不含实时点）
 
-function pushHistory(v) {
-  assetHistory.push({ ts: Date.now(), v: v });
-  if (assetHistory.length > HISTORY_MAX) assetHistory.shift();
+function rebuildTodaySeries(today, now, baseNet, settleTs, todayStart) {
+  var elapsed = Math.max(1000, now - todayStart);
+  var n = Math.max(2, Math.min(360, Math.ceil(elapsed / 60000)));   // 1 分钟一档，全天最多 360 档
+  var pts = [];
+  for (var i = 0; i <= n; i++) {
+    var t = todayStart + Math.round(i / n * elapsed);
+    pts.push({ ts: t, v: virtualAt(Math.min(t, now), baseNet, settleTs, todayStart) });
+  }
+  // 精确跳变点：今天 0 点后的每笔流水按真实时刻插入
+  // （转账/还款不影响净资产，画出来是平段；跳变瞬间不会因分钟采样而被抹平）
+  transactions.forEach(function (tx) {
+    if (tx.ts > todayStart && tx.ts <= now) {
+      pts.push({ ts: tx.ts, v: virtualAt(tx.ts, baseNet, settleTs, todayStart) });
+    }
+  });
+  pts.sort(function (a, b) { return a.ts - b.ts; });
+  todaySeries = { day: today, ver: txVersion, min: Math.floor(now / 60000), pts: pts };
 }
 
 function prepareCanvas(cv) {
@@ -1357,13 +1377,9 @@ function shortMoney(v) {
   return v.toFixed(a < 10 ? 1 : 0);
 }
 
-/* 图一：实时资产分时折线（数据源 currentVirtualAsset）
- * 三条规则：
- *   1) 右侧刻度 + 实时金额药丸标签：留白按文字实测宽度动态计算，任何屏幕宽度都不会被裁切；
- *   2) Y 轴强制包含 0 基线：全正数时底部就是 0，有负数时取 min(0, 最低值)，
- *      换算比例 = 资产 / 最高值，直观体现"从 0 开始积累"；
- *   3) 最左端固定一个"起始"锚点（记账史开始前的资产总和，从零起步就是 0），
- *      曲线永远从左端连过来，刷新页面也不会凭空从中间开始画。 */
+/* 记账史开始前的资产总和（当前净资产 − 全部流水影响）。
+ * 用途：日 K 线自动基准（klineBase）与第一天的昨收参照；
+ * 今日分时图不再使用它（开盘 = 今天 0 点资产，见 rebuildTodaySeries）。 */
 var lineAnchorCache = { ver: -1, v: 0 };
 function lineAnchorValue() {
   if (lineAnchorCache.ver !== txVersion) {
@@ -1394,38 +1410,54 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawLineChart() {
+/* 图一：今日资产分时（今天 0 点开盘 → 现在，数据源 currentVirtualAsset）
+ * 规则：
+ *   1) X 轴 = 今天 0 点 → 现在；左下角刻度为"开盘 + 今天第一笔流水或上班时间"
+ *      （两者取较早者），右下角为"现在"；
+ *   2) 最左侧开盘价经一小段虚线引入，曲线从开盘连到现在，刷新不丢、跨天自动重置；
+ *   3) Y 轴自适应包含今日最高 / 最低点；跨度不足 5 元时以最新值为中心 ±2.5，
+ *      微小的工资上涨也占满画面；
+ *   4) 贝塞尔中点平滑（面积与实线共用 smoothTo），首尾端点严格贴合真实值；
+ *   5) 右侧刻度 + 实时金额药丸：留白按文字实测宽度动态计算，任何屏幕不裁切。 */
+function drawLineChart(nowMs) {
   var cv = $('lineChart');
   if (!cv || !cv.clientWidth) return;
   var p = prepareCanvas(cv), ctx = p.ctx, W = p.w, H = p.h;
   var padL = 8, padT = 10, padB = 16;
-  var data = assetHistory;
   var tc = chartTheme();
+  var now = nowMs || Date.now();
+  var today = todayStr(new Date(now));
+  var todayStart = dayStartOf(now);
+  var baseNet = staticNet();
+  var settleTs = (settle && settle.settled) ? settle.ts : Infinity;
 
   ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
-  if (data.length < 2) {
-    ctx.fillStyle = tc.axis2;
-    ctx.fillText('正在采集数据…', padL, H / 2);
-    return;
-  }
 
-  /* ---- 1. Y 轴取值：围绕最近 200 秒的"流动窗口" ----
-   * 不再把 0 强行纳入范围：资产基数大、每秒增量小时，0 基线会把曲线压成顶部的一条死平线。
-   * 规则：取窗口内极值；若跨度不足 5 元，以最新值为中心强制 ±2.5（并保证包住所有点），
-   * 让微小的"阶梯式"上涨占满画面、清晰可见。
-   * 起始锚点可能落在范围之外，绘制时会钳到画布边缘（虚线从边缘引入）。 */
-  var vLo = Infinity, vHi = -Infinity;
-  for (var i = 0; i < data.length; i++) {
-    if (data[i].v < vLo) vLo = data[i].v;
-    if (data[i].v > vHi) vHi = data[i].v;
+  /* ---- 数据：分钟级采样缓存 + 每秒追加的实时点 ----
+   * 缓存失效：跨天（自动重置）/ 流水变动 / 跨分钟 → 重建回放序列 */
+  if (todaySeries.day !== today || todaySeries.ver !== txVersion ||
+      todaySeries.min !== Math.floor(now / 60000)) {
+    rebuildTodaySeries(today, now, baseNet, settleTs, todayStart);
   }
-  var lastV = data[data.length - 1].v;
-  var MIN_SPAN = 5;                                          // 最小可视跨度（元）
+  var pts = todaySeries.pts.slice();
+  pts.push({ ts: now, v: currentVirtualAsset });
+  if (pts.length < 2) return;
+
+  var lastV = currentVirtualAsset;
+
+  /* ---- 1. Y 轴：今日最高 / 最低自适应 ---- */
+  var vLo = Infinity, vHi = -Infinity;
+  for (var i = 0; i < pts.length; i++) {
+    if (pts[i].v < vLo) vLo = pts[i].v;
+    if (pts[i].v > vHi) vHi = pts[i].v;
+  }
+  var vmin, vmax;
+  var MIN_SPAN = 5;
   if (vHi - vLo < MIN_SPAN) {
     vmin = Math.min(vLo, lastV - MIN_SPAN / 2);              // 最新值 ±2.5 为核心
     vmax = Math.max(vHi, lastV + MIN_SPAN / 2);
   } else {
-    var padSpan = (vHi - vLo) * 0.1;                         // 正常波动：上下各留 10%
+    var padSpan = (vHi - vLo) * 0.1;                         // 上下各留 10%
     vmin = vLo - padSpan;
     vmax = vHi + padSpan;
   }
@@ -1450,39 +1482,27 @@ function drawLineChart() {
   var padR = Math.max(Math.ceil(axisW) + 10, Math.ceil(tagW) + 8, 40);
   var plotW = W - padL - padR, plotH = H - padT - padB;
 
-  /* ---- 3. X 轴：最左 10%（最多 48px）留给"起始 → 第一个实时点"的过渡段 ---- */
-  var anchorX = padL;
-  var curveX = padL + Math.min(plotW * 0.1, 48);
-  var curveW = padL + plotW - curveX;
-  function X(n) { return curveX + n / (data.length - 1) * curveW; }
+  /* ---- 3. X 轴：今天 0 点 → 现在；最左 8%（≤36px）留给开盘虚线引入段 ---- */
+  var leadX = padL + Math.min(plotW * 0.08, 36);
+  var daySpan = Math.max(1, now - todayStart);
+  function X(ts) { return leadX + (ts - todayStart) / daySpan * (padL + plotW - leadX); }
   function Y(v) { return padT + (1 - (v - vmin) / span) * plotH; }
 
-  // 起始锚点：值可能在新窗口范围之外，钳到画布上下边缘，虚线从边缘引入
-  var anchorV = lineAnchorValue();
-  var anchorPt = { x: anchorX, y: Math.max(padT, Math.min(padT + plotH, Y(anchorV))) };
-  var pts = [];
-  for (var j = 0; j < data.length; j++) pts.push({ x: X(j), y: Y(data[j].v) });
-  var last = pts[pts.length - 1];
+  for (var j = 0; j < pts.length; j++) pts[j] = { x: X(pts[j].ts), y: Y(pts[j].v) };
+  var first = pts[0];                                       // 开盘点（今天 0 点）
+  var last = pts[pts.length - 1];                           // 实时点
 
   // 实时金额药丸的几何位置（先算好，后面的刻度文字要避让它）
   var tagH = 16;
   var tagX = padL + plotW + 3;
   var tagY = Math.max(padT, Math.min(padT + plotH - tagH, last.y - tagH / 2));
 
-  /* ---- 网格 / 0 基线 / 右侧刻度 ---- */
+  /* ---- 网格 / 右侧刻度 ---- */
   ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   for (var g = 0; g <= 2; g++) {
     var gy = padT + g / 2 * plotH;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
-  }
-  // 0 基线略微加重，强调"从底部往上积累"的起点
-  if (Math.abs(vmin) < 0.005) {
-    ctx.strokeStyle = tc.flat;
-    ctx.beginPath();
-    ctx.moveTo(padL, padT + plotH);
-    ctx.lineTo(padL + plotW, padT + plotH);
-    ctx.stroke();
   }
   ctx.font = axisFont;
   ctx.fillStyle = tc.axis;
@@ -1499,9 +1519,8 @@ function drawLineChart() {
   ctx.textBaseline = 'alphabetic';
 
   /* ---- 平滑贝塞尔路径：以相邻采样点的中点为端点、真实采样点为控制点 ----
-   * 曲线恒过每段中点、始终从首个真实点出发、终止于最后一个真实点，
-   * 采样点的高度（金额）不被篡改；垂直暴跌的拐弯处形成圆滑"滑梯"，
-   * 每秒几分的工资上涨呈现连续缓慢上扬的弧度。 */
+   * 曲线恒过每段中点、始终从开盘点出发、终止于实时点，采样高度不被篡改；
+   * 流水跳变的拐弯处形成圆滑"滑梯"，工资的连续缓升呈现优美弧度。 */
   function smoothTo() {
     for (var s = 1; s < pts.length - 1; s++) {
       var mx = (pts[s].x + pts[s + 1].x) / 2;
@@ -1511,35 +1530,35 @@ function drawLineChart() {
     ctx.lineTo(last.x, last.y);
   }
 
-  /* ---- 面积：从起始锚点铺到底部，整片渐变（边界走同一条平滑曲线） ---- */
+  /* ---- 面积：从开盘水平线铺到底部，整片渐变（边界走同一条平滑曲线） ---- */
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   grad.addColorStop(0, tc.fillTop);
   grad.addColorStop(1, tc.fillBottom);
   ctx.beginPath();
-  ctx.moveTo(anchorPt.x, anchorPt.y);
-  ctx.lineTo(pts[0].x, pts[0].y);
+  ctx.moveTo(padL, first.y);
+  ctx.lineTo(first.x, first.y);
   smoothTo();
   ctx.lineTo(last.x, padT + plotH);
-  ctx.lineTo(anchorPt.x, padT + plotH);
+  ctx.lineTo(padL, padT + plotH);
   ctx.closePath();
   ctx.fillStyle = grad;
   ctx.fill();
 
-  /* ---- 起始段：虚线弱化，读作"历史/起点段" ---- */
+  /* ---- 开盘引入段：虚线弱化，读作"今天从开盘价起步" ---- */
   ctx.save();
   ctx.globalAlpha = .5;
   ctx.setLineDash([3, 3]);
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(anchorPt.x, anchorPt.y);
-  ctx.lineTo(pts[0].x, pts[0].y);
+  ctx.moveTo(padL, first.y);
+  ctx.lineTo(first.x, first.y);
   ctx.stroke();
   ctx.restore();
 
   /* ---- 实时段：平滑贝塞尔实线 + 圆头（首尾端点严格贴合真实值） ---- */
   ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
+  ctx.moveTo(first.x, first.y);
   smoothTo();
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
@@ -1547,18 +1566,34 @@ function drawLineChart() {
   ctx.lineCap = 'round';
   ctx.stroke();
 
-  /* ---- 起始锚点：空心小圆 + "起始"字样 ---- */
+  /* ---- 开盘锚点：空心小圆 ---- */
   ctx.beginPath();
-  ctx.arc(anchorPt.x, anchorPt.y, 2.5, 0, Math.PI * 2);
+  ctx.arc(first.x, first.y, 2.5, 0, Math.PI * 2);
   ctx.fillStyle = tc.bodyBg;
   ctx.fill();
   ctx.strokeStyle = tc.axis2;
   ctx.lineWidth = 1.2;
   ctx.stroke();
+
+  /* ---- X 轴刻度：左 = 开盘 + 今天第一笔流水/上班时间（取较早），右 = 现在 ---- */
+  var firstAct = null;
+  transactions.forEach(function (tx) {
+    if (tx.ts >= todayStart && tx.ts <= now && (firstAct === null || tx.ts < firstAct)) firstAct = tx.ts;
+  });
+  if (settings.autoAccrual) {
+    var ws = payBounds(now).start;
+    if (ws >= todayStart && ws <= now && (firstAct === null || ws < firstAct)) firstAct = ws;
+  }
+  function fmtHM(t) {
+    var d = new Date(t);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
   ctx.fillStyle = tc.axis2;
   ctx.font = axisFont;
   ctx.textAlign = 'left';
-  ctx.fillText('起始', anchorPt.x, H - 4);
+  ctx.fillText('开盘' + (firstAct ? ' ' + fmtHM(firstAct) : ''), padL, H - 4);
+  ctx.textAlign = 'right';
+  ctx.fillText('现在', padL + plotW, H - 4);
 
   /* ---- 末端圆点 ---- */
   ctx.beginPath();
@@ -1984,7 +2019,7 @@ function klineHit(clientX, cv) {
 })();
 
 function drawCharts(nowMs) {
-  drawLineChart();
+  drawLineChart(nowMs);
   drawKlineChart(nowMs);
 }
 
@@ -2296,7 +2331,6 @@ $('btnAddTx').addEventListener('click', function () {
   $('fAmount').value = '';
   $('fNote').value = '';
   renderAll();
-  pushHistory(currentVirtualAsset);   // 收支会让折线跳变；转账/还款不改变净资产，曲线保持平稳
   drawCharts();
 });
 
@@ -2363,7 +2397,6 @@ $('txList').addEventListener('click', function (e) {
     saveJSON(K_ACC, accounts);
   }
   renderAll();
-  pushHistory(currentVirtualAsset);
   drawCharts();
 });
 
@@ -2427,7 +2460,6 @@ function confirmRepay() {
 
   repayMask.classList.remove('show');
   renderAll();
-  pushHistory(currentVirtualAsset);   // 总净资产不变，折线保持平稳
   drawCharts();
 }
 
@@ -2576,7 +2608,6 @@ $('btnSaveSettings').addEventListener('click', function () {
   saveJSON(K_SET, settings);
 
   renderAll();
-  pushHistory(currentVirtualAsset);
   drawCharts();
   alert('计薪设置已保存');
 });
@@ -2666,7 +2697,6 @@ $('btnSaveAccount').addEventListener('click', function () {
     resetAccountForm();
   }
   renderAll();
-  pushHistory(currentVirtualAsset);
   drawCharts();
 });
 
@@ -2789,7 +2819,6 @@ $('fileInput').addEventListener('change', function (e) {
 
       mask.classList.remove('show');
       renderAll();
-      pushHistory(currentVirtualAsset);
       drawCharts();
       alert('导入成功，共恢复 ' + accounts.length + ' 个账户、' + transactions.length + ' 条流水');
     } catch (err) {
@@ -2821,7 +2850,6 @@ switchType('expense');
 
 // 预填基线采样，打开即有走势
 for (var si = 0; si < 12; si++) {
-  pushHistory(staticNet() + (settledToday() ? 0 : earnedRaw(Date.now())));
 }
 
 renderAll();
