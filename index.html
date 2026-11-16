@@ -932,14 +932,16 @@ function workHours(now) {
   return h > 0.1 ? h : 0.1;
 }
 
-/* 每秒收入（底层完整浮点，不做四舍五入） */
+/* 每秒收入（底层完整浮点，不做四舍五入）
+ * 兜底规则：识别不了的模式一律按"月薪"计 —— 旧版残留的 'month' 等值
+ * 绝不能落进时薪分支，否则月薪 6300 会变成每秒 1.75 元、一天虚增约 4.9 万 */
 function perSecondIncome() {
   var h = workHours();
-  var mode = settings.salaryMode;
+  var mode = String(settings.salaryMode || '');
   var v = Number(settings.salaryValue) || 0;
-  if (mode === 'monthly') return v / MONTH_DAYS / h / 3600;
-  if (mode === 'daily')   return v / h / 3600;
-  return v / 3600;  // hourly
+  if (mode === 'daily' || mode === 'day')     return v / h / 3600;
+  if (mode === 'hourly' || mode === 'hour')   return v / 3600;
+  return v / MONTH_DAYS / h / 3600;  // monthly（含旧版 'month' 及未知值）
 }
 
 /* 满勤日收入 */
@@ -952,6 +954,8 @@ function fullDayPay() {
  */
 function earnedRaw(now) {
   if (!settings.autoAccrual) return 0;
+  var wd = new Date(now).getDay();
+  if (wd === 0 || wd === 6) return 0;   // 周末不发工资：周日/周六计薪恒为 0，资产保持不变
   var b = payBounds(now);
   var totalSec = workHours() * 3600;
   if (now < b.start) return 0;
@@ -1033,6 +1037,7 @@ function createIncomeTx(amount, when, note, category) {
 /* 今日工资落袋：把实时已赚结算为真实收入，并重置今日虚拟计薪 */
 function settleTodaySalary() {
   var now = new Date();
+  if (now.getDay() === 0 || now.getDay() === 6) { alert('周末不发工资，好好休息～'); return; }
   if (settledToday(now.getTime())) { alert('今天已经落袋过啦'); return; }
   var pay = round2(earnedRaw(now.getTime()));
   if (!(pay > 0)) { alert('当前不在计薪时段内，暂时没有可落袋的工资'); return; }
@@ -1055,9 +1060,10 @@ function checkDayRollover() {
   }
   if (settle.date === t) return;
 
-  // 结算前一天（若未落袋且开启了自动增资）
+  // 结算前一天（若未落袋且开启了自动增资；周末不发工资 —— 周六/周日不结算）
   var settled = false;
-  if (!settle.settled && settings.autoAccrual) {
+  var prevDow = new Date(settle.date + 'T12:00:00').getDay();   // 用正午规避时区偏移
+  if (!settle.settled && settings.autoAccrual && prevDow !== 0 && prevDow !== 6) {
     var pay = round2(fullDayPay());
     if (pay > 0) {
       var d = new Date(settle.date + 'T23:59:59');
@@ -1483,14 +1489,27 @@ function drawLineChart() {
   }
   ctx.textBaseline = 'alphabetic';
 
-  /* ---- 面积：从起始锚点铺到底部，整片渐变 ---- */
+  /* ---- 平滑贝塞尔路径：以相邻采样点的中点为端点、真实采样点为控制点 ----
+   * 曲线恒过每段中点、始终从首个真实点出发、终止于最后一个真实点，
+   * 采样点的高度（金额）不被篡改；垂直暴跌的拐弯处形成圆滑"滑梯"，
+   * 每秒几分的工资上涨呈现连续缓慢上扬的弧度。 */
+  function smoothTo() {
+    for (var s = 1; s < pts.length - 1; s++) {
+      var mx = (pts[s].x + pts[s + 1].x) / 2;
+      var my = (pts[s].y + pts[s + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[s].x, pts[s].y, mx, my);
+    }
+    ctx.lineTo(last.x, last.y);
+  }
+
+  /* ---- 面积：从起始锚点铺到底部，整片渐变（边界走同一条平滑曲线） ---- */
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   grad.addColorStop(0, tc.fillTop);
   grad.addColorStop(1, tc.fillBottom);
   ctx.beginPath();
   ctx.moveTo(anchorPt.x, anchorPt.y);
   ctx.lineTo(pts[0].x, pts[0].y);
-  for (var k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);   // 直线连接：阶梯式上涨不被平滑抹掉
+  smoothTo();
   ctx.lineTo(last.x, padT + plotH);
   ctx.lineTo(anchorPt.x, padT + plotH);
   ctx.closePath();
@@ -1509,10 +1528,10 @@ function drawLineChart() {
   ctx.stroke();
   ctx.restore();
 
-  /* ---- 实时段：实线（直线段连接，保留每个秒级阶梯） + 圆头 ---- */
+  /* ---- 实时段：平滑贝塞尔实线 + 圆头（首尾端点严格贴合真实值） ---- */
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
-  for (var k2 = 1; k2 < pts.length; k2++) ctx.lineTo(pts[k2].x, pts[k2].y);
+  smoothTo();
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
@@ -1590,7 +1609,13 @@ var cachedToday = { open: 0, hi: -Infinity, lo: Infinity };  // 今天蜡烛的�
 var candleVer = -1;          // 上次重建时的 txVersion
 var candleDay = '';          // 上次重建时的"今天"（跨天失效）
 
-/* 全量重建：后缀和 + 单次正序遍历，构建历史各日蜡烛与今天快照极值 */
+/* 全量重建：后缀和 + 单次正序遍历，构建历史各日蜡烛与今天快照极值。
+ * 【一天一根 · 唯一主键】日期一律用 todayStr(new Date(tx.ts)) 从时间戳推导，
+ * 绝不信任流水上的 date 字符串 —— 陈旧/错位/导入的 date 会把同一天拆成
+ * 两根 K 线（历史一根 + "今天"一根，逐秒闪烁）。同一天的多段流水
+ * （含乱序回插）全部合并进同一根蜡烛；key === today 的组永远不进历史
+ * 缓存 —— "今天"只存在于最右侧那根实时蜡烛上，收盘每秒取
+ * currentVirtualAsset 重绘，历史日不受影响。 */
 function rebuildCandleCache(today, baseNet, settleTs, todayStart) {
   var txs = transactions.slice().sort(function (a, b) { return a.ts - b.ts; });
   var n = txs.length;
@@ -1598,36 +1623,38 @@ function rebuildCandleCache(today, baseNet, settleTs, todayStart) {
   suffix[n] = 0;
   for (var i = n - 1; i >= 0; i--) suffix[i] = suffix[i + 1] + txEffect(txs[i]);
 
+  var byDay = {};                          // key -> 当日蜡烛（同日多段合并，一天只有一根）
+  var order = [];                          // 按日期升序
   var hist = [];
-  var tOpen = baseNet, tHi = -Infinity, tLo = Infinity, hasToday = false;
-  var curKey = null, cur = null;
+  var tOpen = null, tHi = -Infinity, tLo = Infinity;
 
-  for (var j = 0; j <= n; j++) {
-    var tx = j < n ? txs[j] : null;
-    var k = tx ? (tx.date || todayStr(new Date(tx.ts))) : null;
-    if (cur && (j === n || k !== curKey)) {
-      // 关闭当前日期组：收盘 = 组末尾资产（即下一笔流水发生前的资产）
-      cur.close = baseNet - suffix[j];
-      if (cur.close > cur.high) cur.high = cur.close;
-      if (cur.close < cur.low) cur.low = cur.close;
-      if (curKey === today) { tOpen = cur.open; tHi = cur.high; tLo = cur.low; hasToday = true; }
-      else hist.push(cur);
-      cur = null;
+  for (var j = 0; j < n; j++) {
+    var tx = txs[j];
+    var dayStart = baseNet - suffix[j];    // 本笔流水发生前的资产快照
+    var key = todayStr(new Date(tx.ts));   // 唯一主键：时间戳推导的 YYYY-MM-DD
+    if (key > today) key = today;          // 防御：异常的未来时间戳并入今天
+    var c = byDay[key];
+    if (!c) {
+      c = byDay[key] = {
+        key: key, label: key === today ? '今天' : key.slice(5), isToday: key === today,
+        open: dayStart, high: dayStart, low: dayStart, close: dayStart
+      };
+      order.push(key);
     }
-    if (!tx) break;
-    var groupKey = k >= today ? today : k;   // 防御：异常的未来日期并入今天
-    if (!cur || groupKey !== curKey) {
-      curKey = groupKey;
-      cur = { key: curKey, label: curKey === today ? '今天' : curKey.slice(5), isToday: curKey === today,
-              open: baseNet - suffix[j], high: -Infinity, low: Infinity };
-      cur.high = cur.open; cur.low = cur.open;
-    }
-    var vAfter = baseNet - suffix[j] + txEffect(tx);   // 本笔流水发生后的资产快照
-    if (cur.isToday && tx.ts >= todayStart && tx.ts < settleTs) vAfter += earnedRaw(tx.ts + 1);
-    if (vAfter > cur.high) cur.high = vAfter;
-    if (vAfter < cur.low) cur.low = vAfter;
+    var vAfter = dayStart + txEffect(tx);  // 本笔流水发生后的资产快照
+    if (key === today && tx.ts >= todayStart && tx.ts < settleTs) vAfter += earnedRaw(tx.ts + 1);
+    if (vAfter > c.high) c.high = vAfter;
+    if (vAfter < c.low) c.low = vAfter;
+    c.close = vAfter;                      // 收盘 = 当日最后一笔后的资产（= 次日开盘，链式一致）
   }
-  if (!hasToday) { tOpen = baseNet; tHi = -Infinity; tLo = Infinity; }
+
+  for (var m = 0; m < order.length; m++) {
+    var k2 = order[m], c2 = byDay[k2];
+    if (k2 === today) { tOpen = c2.open; tHi = c2.high; tLo = c2.low; }
+    else hist.push(c2);
+  }
+  // 今天没有流水：开盘 = 日初资产（= 昨收；一笔流水都没有时 = 初始资产）
+  if (tOpen === null) tOpen = baseNet;
   cachedCandles = hist;
   cachedToday = { open: tOpen, hi: tHi, lo: tLo };
 }
@@ -1640,8 +1667,10 @@ function rebuildCandleCache(today, baseNet, settleTs, todayStart) {
  *     负资产区间同样成立：昨收 -39000 → 今天 -38700 = +0.77%（资产增加）；
  *   - 红绿 = 当日收盘资产 与 昨收 的绝对金额比较（与涨幅%严格同向）。
  * 每根蜡烛携带：
- *   绝对金额 open/high/low/close（元，悬停框展示真实资产与昨收）
- *   日环比百分比 pOpen/pHigh/pLow/pClose（%，开盘恒为 0%，Y 轴与蜡烛绘制用）
+ *   绝对金额 open/high/low/close（元，Y 轴与蜡烛绘制全部用它；
+ *   开盘严格等于前一根收盘，首尾相连，悬停框展示真实资产与昨收）
+ *   日环比百分比 pOpen/pHigh/pLow/pClose（%，只用于左上角标题与悬停框，
+ *   绝不映射到 Y 轴坐标）
  *   prevClose：本日的"昨收"参照金额（悬停框展示） */
 function buildDailyCandles(now) {
   var today = todayStr(new Date(now));
@@ -1732,28 +1761,28 @@ function drawKlineChart(nowMs) {
       candles[0].label + ' ~ ' + candles[candles.length - 1].label + '）';
   }
 
-  /* ---- Y 轴：按图内最高 / 最低涨幅自适应，0% 永远在范围内 ----
-   * 出现 +1000% 这种极端行情时，轴自动拉伸到千级，
-   * 普通 +1% 的日子被压缩成贴近平盘的短线 —— 这是刻意保留的真实压缩感。 */
-  var gMin = 0, gMax = 0;
+  /* ---- Y 轴：绝对金额（元），按图内蜡烛真实最高 / 最低资产自适应 ----
+   * 百分比绝不参与坐标映射 —— 涨跌幅只出现在左上角标题和悬停框里。
+   * 首尾相连由数据层保证：每根蜡烛的 open 严格等于前一根的 close。 */
+  var vMin = Infinity, vMax = -Infinity;
   candles.forEach(function (c) {
-    if (c.pHigh > gMax) gMax = c.pHigh;
-    if (c.pLow < gMin) gMin = c.pLow;
+    if (c.high > vMax) vMax = c.high;
+    if (c.low < vMin) vMin = c.low;
   });
-  var rawSpan = gMax - gMin;
-  if (rawSpan < 0.5) {                        // 全平盘：给 0.5% 的可视高度，避免除零
-    var mid = (gMax + gMin) / 2;
-    gMax = mid + 0.25; gMin = mid - 0.25; rawSpan = 0.5;
+  var rawSpan = vMax - vMin;
+  if (rawSpan < 1) {                          // 全平盘：给 1 元的可视高度，避免除零
+    var midV = (vMax + vMin) / 2;
+    vMax = midV + 0.5; vMin = midV - 0.5; rawSpan = 1;
   }
-  var padP = rawSpan * 0.08;                  // 上下各留 8% 空白，最高那根柱子不会被截断
-  var yMax = gMax + padP, yMin = gMin - padP, ySpan = yMax - yMin;
+  var padV = rawSpan * 0.08;                  // 上下各留 8% 空白，最高那根柱子不会被截断
+  var yMax = vMax + padV, yMin = vMin - padV, ySpan = yMax - yMin;
 
-  /* ---- 右侧刻度：先实测 "+1050%" 这类文字的宽度，再决定 padR，任何值都不会被切 ---- */
+  /* ---- 右侧刻度：金额格式，先实测最宽文字再决定 padR，任何值都不会被切 ---- */
   ctx.font = '9px -apple-system, sans-serif';
   var ticks = [yMax, (yMax + yMin) / 2, yMin];
   var tickW = 0;
   ticks.forEach(function (v) {
-    var w2 = ctx.measureText(pctText(v)).width;
+    var w2 = ctx.measureText(axisMoney(v)).width;
     if (w2 > tickW) tickW = w2;
   });
   var padR = Math.max(40, Math.ceil(tickW) + 12);
@@ -1774,7 +1803,7 @@ function drawKlineChart(nowMs) {
     ctx.fillRect(x0 + slot * klineHover, padT, slot, plotH);
   }
 
-  // 网格 + 右侧百分比刻度
+  // 网格 + 右侧金额刻度
   ctx.strokeStyle = tc.grid;
   ctx.lineWidth = 1;
   ctx.font = '9px -apple-system, sans-serif';
@@ -1783,27 +1812,31 @@ function drawKlineChart(nowMs) {
   for (var g2 = 0; g2 <= 2; g2++) {
     var gy = padT + g2 / 2 * plotH;
     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
-    ctx.fillText(pctText(ticks[g2]), padL + plotW + 6, gy + 3);
+    ctx.fillText(axisMoney(ticks[g2]), padL + plotW + 6, gy + 3);
   }
 
-  // 0% 基准虚线：整张图的水平参照，"初始"蜡烛正好落在它上面
-  var y0 = Y(0);
-  ctx.save();
-  ctx.strokeStyle = tc.flat;
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  ctx.moveTo(padL, y0);
-  ctx.lineTo(padL + plotW, y0);
-  ctx.stroke();
-  ctx.restore();
+  // 基准虚线：落在"初始"锚点蜡烛的水平位置（klineBase），
+  // 在轴范围内才画 —— 它是涨幅计算的 0% 参照
+  var baseV = candles[0].isInit ? candles[0].close : klineBase();
+  if (baseV > yMin && baseV < yMax) {
+    var y0 = Y(baseV);
+    ctx.save();
+    ctx.strokeStyle = tc.flat;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(padL, y0);
+    ctx.lineTo(padL + plotW, y0);
+    ctx.stroke();
+    ctx.restore();
+  }
 
-  // 蜡烛：阳线红空心 / 阴线绿实心 / 平盘灰细线
+  // 蜡烛：阳线红空心 / 阴线绿实心 / 平盘灰细线（坐标全部用绝对金额，开=昨收首尾相连）
   candles.forEach(function (c, i) {
     var cx = x0 + slot * (i + 0.5);
-    var yH = Y(c.pHigh), yL = Y(c.pLow), yO = Y(c.pOpen), yC = Y(c.pClose);
-    var up = c.close >= c.open;   // 红绿严格按绝对资产金额比较（涨幅%与资产同向，但金额比较更直白、永不出错）
-    var flat = Math.abs(c.pClose - c.pOpen) <= 0.005 && Math.abs(c.pHigh - c.pLow) <= 0.005;
+    var yH = Y(c.high), yL = Y(c.low), yO = Y(c.open), yC = Y(c.close);
+    var up = c.close >= c.open;   // 红绿严格按绝对资产金额比较：今天资产 > 昨天资产 = 红涨
+    var flat = Math.abs(c.close - c.open) <= 0.005 && Math.abs(c.high - c.low) <= 0.005;
 
     if (flat) {
       // 平盘（含"初始"基准蜡烛）：一根横线，初始用深一点的颜色做锚点
@@ -1871,8 +1904,8 @@ function drawKlineChart(nowMs) {
         { t: '涨幅 ' + pctText(c2.pClose) + (up2 ? ' ↑' : ' ↓'), c: up2 ? '#fca5a5' : '#86efac' },
         { t: '收 ' + money(c2.close), c: '#d1d5db' },
         { t: '昨收 ' + money(ref2), c: '#9ca3af' },
-        { t: '开 ' + pctText(c2.pOpen) + '  高 ' + pctText(c2.pHigh), c: '#9ca3af' },
-        { t: '低 ' + pctText(c2.pLow) + '  收 ' + pctText(c2.pClose), c: '#9ca3af' }
+        { t: '高 ' + money(c2.high), c: '#fca5a5' },
+        { t: '低 ' + money(c2.low), c: '#86efac' }
       ];
     }
     // 框宽按最长一行实测，避免"+1000%"这类长文本溢出
