@@ -1331,8 +1331,8 @@ function chartTheme() {
  *  今日分时：数据源 = 今天 0 点开盘 → 现在
  *  旧版只保留最近 200 秒的滚动采样数组，一刷新就丢、没有连贯感；
  *  现在【不存任何历史采样】，每次需要时从流水 + 虚拟工资回放重建：
- *    - 开盘 = 今天 0 点的资产（昨晚自动结算已计入余额，今天工资/流水从 0 起算）；
- *    - 分钟级采样 virtualAt()（全天最多 360 档）+ 每笔流水的精确跳变点；
+ *    - 开盘 = 今天 00:00 的总资产（= 当前余额 − 今天流水影响；昨晚结算、已有负债全在余额里）；
+ *    - 分钟级采样（全天最多 360 档）+ 今天每笔流水的精确跳变点，流水只遍历今天的 tx.ts；
  *    - 实时点（当前动态总资产）绘制时每秒追加，红绿跳动只影响今天；
  *    - 跨天自动重置：day 变了整个序列重建，天然从新一天 0 点开始画。
  *  日 K 线继续承载长期历史趋势，两者互不影响。
@@ -1342,19 +1342,45 @@ var todaySeries = { day: '', ver: -1, min: -1, pts: [] };   // 分钟级采样�
 function rebuildTodaySeries(today, now, baseNet, settleTs, todayStart) {
   var elapsed = Math.max(1000, now - todayStart);
   var n = Math.max(2, Math.min(360, Math.ceil(elapsed / 60000)));   // 1 分钟一档，全天最多 360 档
+
+  /* 开盘 = 今天 00:00 的总资产 = 当前静态净资产 − 今天流水的净资产影响。
+   * 昨天的一切（昨晚自动结算、已有负债、历史涨跌）都已经体现在当前余额里，
+   * 这里只减去"今天发生的部分"——昨天的暴跌暴涨绝不可能渗进今天的曲线。 */
+  var open0 = baseNet;
+  var txs = [];
+  for (var q = 0; q < transactions.length; q++) {
+    var tx = transactions[q];
+    if (tx.ts > todayStart && tx.ts <= now) {   // 只遍历今天的 tx.ts；未来流水一律不碰
+      open0 -= txEffect(tx);
+      txs.push(tx);
+    }
+  }
+  txs.sort(function (a, b) { return a.ts - b.ts; });
+
+  // 虚拟工资：已落袋后归零（余额里已含落袋那笔流水，不能再叠加）
+  function earnedAt(t) {
+    return (settleTs !== undefined && t < settleTs) ? earnedRaw(t) : 0;
+  }
+
+  /* 单次双指针合并：分钟采样 × 流水精确跳变点（转账零影响 → 平段点） */
   var pts = [];
+  var cum = 0, k = 0;
   for (var i = 0; i <= n; i++) {
     var t = todayStart + Math.round(i / n * elapsed);
-    pts.push({ ts: t, v: virtualAt(Math.min(t, now), baseNet, settleTs, todayStart) });
-  }
-  // 精确跳变点：今天 0 点后的每笔流水按真实时刻插入
-  // （转账/还款不影响净资产，画出来是平段；跳变瞬间不会因分钟采样而被抹平）
-  transactions.forEach(function (tx) {
-    if (tx.ts > todayStart && tx.ts <= now) {
-      pts.push({ ts: tx.ts, v: virtualAt(tx.ts, baseNet, settleTs, todayStart) });
+    while (k < txs.length && txs[k].ts <= t) {
+      var tt = txs[k].ts;
+      cum += txEffect(txs[k]);
+      pts.push({ ts: tt, v: open0 + cum + earnedAt(tt) });
+      k++;
     }
-  });
-  pts.sort(function (a, b) { return a.ts - b.ts; });
+    pts.push({ ts: t, v: open0 + cum + earnedAt(t) });
+  }
+  while (k < txs.length) {                      // 兜底：采样边界四舍五入漏掉的尾笔
+    var tt2 = txs[k].ts;
+    cum += txEffect(txs[k]);
+    pts.push({ ts: tt2, v: open0 + cum + earnedAt(tt2) });
+    k++;
+  }
   todaySeries = { day: today, ver: txVersion, min: Math.floor(now / 60000), pts: pts };
 }
 
@@ -1415,10 +1441,12 @@ function roundRectPath(ctx, x, y, w, h, r) {
  *   1) X 轴 = 今天 00:00（自然日零点）→ 现在，0 点就落在绘图区左边缘；
  *      左下角刻度固定为"开盘 00:00"，右下角为"现在"——夜间的收支也如实呈现；
  *   2) 曲线从开盘（0 点资产）连到现在，刷新不丢、跨天自动重置；
- *   3) Y 轴自适应包含今日最高 / 最低点；跨度不足 5 元时以最新值为中心 ±2.5，
- *      微小的工资上涨也占满画面；
- *   4) 纯直线连接（lineTo）：流水跳变垂直砸落、工资缓升如实爬升，绝不平滑篡改走势；
- *   5) 右侧刻度 + 实时金额药丸：留白按文字实测宽度动态计算，任何屏幕不裁切。 */
+ *   3) Y 轴自适应包含今日最高 / 最低点；跨度不足 200 元（MIN_SPAN）时以最新值为中心
+ *      强制扩展，日常小波动不会被极度拉伸；
+ *   4) 二次贝塞尔中点平滑（面积与实线共用）：日常收益呈现连续弧度，
+ *      极端瞬间跳变（如秒级记入大额负债）在拐弯处收窄，但整体依旧陡峭；
+ *   5) 右侧刻度：Y 轴跨度 < 10000 时直接显示绝对金额，否则用"万"缩写；
+ *      刻度 + 实时金额药丸的留白按文字实测宽度动态计算，任何屏幕不裁切。 */
 function drawLineChart(nowMs) {
   var cv = $('lineChart');
   if (!cv || !cv.clientWidth) return;
@@ -1452,9 +1480,9 @@ function drawLineChart(nowMs) {
     if (pts[i].v > vHi) vHi = pts[i].v;
   }
   var vmin, vmax;
-  var MIN_SPAN = 5;
+  var MIN_SPAN = 200;                    // 全天波幅不足 200 元时强制扩展，小波动不被夸大
   if (vHi - vLo < MIN_SPAN) {
-    vmin = Math.min(vLo, lastV - MIN_SPAN / 2);              // 最新值 ±2.5 为核心
+    vmin = Math.min(vLo, lastV - MIN_SPAN / 2);              // 最新值 ±100 为核心
     vmax = Math.max(vHi, lastV + MIN_SPAN / 2);
   } else {
     var padSpan = (vHi - vLo) * 0.1;                         // 上下各留 10%
@@ -1462,6 +1490,12 @@ function drawLineChart(nowMs) {
     vmax = vHi + padSpan;
   }
   var span = vmax - vmin;
+
+  /* 刻度格式：跨度 < 1 万 → 绝对金额（如 -45768），否则才用"万"缩写，
+   * 避免三个刻度全是 -4.6万 根本看不出差异 */
+  function tickText(v) {
+    return span < 10000 ? String(Math.round(v)) : axisMoney(v);
+  }
 
   /* ---- 2. 右侧留白：按刻度与标签文字实测宽度算，杜绝数字被切断 ---- */
   var tagFont = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
@@ -1475,9 +1509,9 @@ function drawLineChart(nowMs) {
   var axisFont = '9px -apple-system, sans-serif';
   ctx.font = axisFont;
   var axisW = Math.max(
-    ctx.measureText(axisMoney(vmax)).width,
-    ctx.measureText(axisMoney((vmax + vmin) / 2)).width,
-    ctx.measureText(axisMoney(vmin)).width
+    ctx.measureText(tickText(vmax)).width,
+    ctx.measureText(tickText((vmax + vmin) / 2)).width,
+    ctx.measureText(tickText(vmin)).width
   );
   var padR = Math.max(Math.ceil(axisW) + 10, Math.ceil(tagW) + 8, 40);
   var plotW = W - padL - padR, plotH = H - padT - padB;
@@ -1514,25 +1548,31 @@ function drawLineChart(nowMs) {
     // 与实时金额药丸重叠的刻度省略不画，避免文字叠字
     if (ly + 7 > tagY && ly - 7 < tagY + tagH) continue;
     var lv = g2 === 0 ? vmax : (g2 === 1 ? (vmax + vmin) / 2 : vmin);
-    ctx.fillText(axisMoney(lv), W - 2, ly);
+    ctx.fillText(tickText(lv), W - 2, ly);
   }
   ctx.textBaseline = 'alphabetic';
 
-  /* ---- 折线路径：逐点直线连接（lineTo），忠实还原每一秒的真实资产 ----
-   * 大额负债瞬间入账 → 垂直砸落；工资每秒爬升 → 直线缓升；
-   * 任何平滑算法都会掩盖跳变的真实性，这里一律不用。 */
-  function tracePath() {
-    for (var s = 1; s < pts.length; s++) ctx.lineTo(pts[s].x, pts[s].y);
+  /* ---- 二次贝塞尔中点平滑：以相邻采样点的中点为端点、真实采样点为控制点 ----
+   * 曲线恒过每段中点、始终从开盘点出发、终止于实时点，采样高度不被篡改；
+   * 日常工资的连续缓升呈现优美弧度；极端瞬间跳变（秒级大额负债）拐弯处
+   * 收窄成陡峭滑梯，但整体依然陡落，视觉上依旧"垂直感"明显。 */
+  function smoothTo() {
+    for (var s = 1; s < pts.length - 1; s++) {
+      var mx = (pts[s].x + pts[s + 1].x) / 2;
+      var my = (pts[s].y + pts[s + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[s].x, pts[s].y, mx, my);
+    }
+    ctx.lineTo(last.x, last.y);
   }
 
-  /* ---- 面积：从开盘水平线铺到底部，整片渐变（边界走同一条折线） ---- */
+  /* ---- 面积：从开盘水平线铺到底部，整片渐变（边界走同一条平滑曲线） ---- */
   var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
   grad.addColorStop(0, tc.fillTop);
   grad.addColorStop(1, tc.fillBottom);
   ctx.beginPath();
   ctx.moveTo(padL, first.y);
   ctx.lineTo(first.x, first.y);
-  tracePath();
+  smoothTo();
   ctx.lineTo(last.x, padT + plotH);
   ctx.lineTo(padL, padT + plotH);
   ctx.closePath();
@@ -1553,10 +1593,10 @@ function drawLineChart(nowMs) {
     ctx.restore();
   }
 
-  /* ---- 实时段：直线折线 + 圆头 ---- */
+  /* ---- 实时段：平滑贝塞尔实线 + 圆头（首尾端点严格贴合真实值） ---- */
   ctx.beginPath();
   ctx.moveTo(first.x, first.y);
-  tracePath();
+  smoothTo();
   ctx.strokeStyle = tc.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
@@ -1609,24 +1649,11 @@ function drawLineChart(nowMs) {
 var klineHover = -1;    // 悬停/点按选中的蜡烛索引
 var klineGeom = null;   // 命中检测用的几何信息 { padL, slot, n }
 
-/* 某一时刻的虚拟资产（不含 t 及之后的流水；已落袋后不再叠加虚拟工资） */
-function netAt(t, baseNet) {
-  var sum = 0;
-  transactions.forEach(function (tx) { if (tx.ts >= t) sum += txEffect(tx); });
-  return baseNet - sum;
-}
+/* 单笔流水对总净资产的影响：收入 +、支出 −、转账（含还款）0 —— 账户内部对冲 */
 function txEffect(tx) {
   if (tx.type === 'income') return tx.amount;
   if (tx.type === 'expense') return -tx.amount;
-  return 0;   // 转账不影响净资产
-}
-/* 某一时刻的虚拟资产（不含 t 及之后的流水）
- * 虚拟工资只对「今天」生效：历史日的资产完全由真实流水回放，
- * 避免把当前薪资折算错误地叠加到过去日期上 */
-function virtualAt(t, baseNet, settleTs, todayStart) {
-  var v = netAt(t, baseNet);
-  if (t < settleTs && t >= todayStart) v += earnedRaw(t);
-  return v;
+  return 0;
 }
 
 /* ---------- K 线缓存 ----------
